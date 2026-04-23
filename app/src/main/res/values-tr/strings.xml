@@ -142,7 +142,7 @@
     <string name="action_stream">Yayın</string>
     <string name="action_unavailable">Mevcut Değil</string>
     <string name="action_download">İndir</string>
-    <string name="download_format">İndirme Biçimi</string>
+    <string name="download_format">Формат загрузки</string>
     <string name="action_stream_now">Şimdi Yayından Oku</string>
     <string name="action_read">Oku</string>
     <string name="no_supported_formats">Desteklenen bir biçim yok.</string>
