@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="book_count">
+        <item quantity="other">%1$d sách</item>
+    </plurals>
+    <plurals name="book_word">
+        <item quantity="other">sách</item>
+    </plurals>
+    <plurals name="shelf_count">
+        <item quantity="other">%1$d ngăn</item>
+    </plurals>
+</resources>

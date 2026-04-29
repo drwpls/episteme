@@ -1,3 +1,57 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <plurals name="book_count">
+        <item quantity="one">%1$d книга</item>
+        <item quantity="few">%1$d книги</item>
+        <item quantity="many">%1$d книг</item>
+        <item quantity="other">%1$d книг</item>
+    </plurals>
+    <plurals name="book_word">
+        <item quantity="one">книга</item>
+        <item quantity="few">книги</item>
+        <item quantity="many">книг</item>
+        <item quantity="other">книг</item>
+    </plurals>
+    <plurals name="shelf_count">
+        <item quantity="one">%1$d полка</item>
+        <item quantity="few">%1$d полки</item>
+        <item quantity="many">%1$d полок</item>
+        <item quantity="other">%1$d полок</item>
+    </plurals>
+    <plurals name="search_results_count">
+        <item quantity="one">%1$d результат</item>
+        <item quantity="few">%1$d результата</item>
+        <item quantity="many">%1$d результатов</item>
+        <item quantity="other">%1$d результатов</item>
+    </plurals>
+    <plurals name="dialog_delete_permanently">
+        <item quantity="one">файл</item>
+        <item quantity="few">файла</item>
+        <item quantity="many">файлов</item>
+        <item quantity="other">файлов</item>
+    </plurals>
+    <plurals name="dialog_permanently_delete_desc">
+        <item quantity="one">Вы действительно хотите безвозвратно удалить %1$d выбранный файл с вашего устройства? Это действие нельзя отменить.</item>
+        <item quantity="few">Вы действительно хотите безвозвратно удалить %1$d выбранных файла с вашего устройства? Это действие нельзя отменить.</item>
+        <item quantity="many">Вы действительно хотите безвозвратно удалить %1$d выбранных файлов с вашего устройства? Это действие нельзя отменить.</item>
+        <item quantity="other">Вы действительно хотите безвозвратно удалить %1$d выбранных файлов с вашего устройства? Это действие нельзя отменить.</item>
+    </plurals>
+    <plurals name="dialog_remove_recents_desc">
+        <item quantity="one">Вы хотите удалить %1$d выбранный файл из списка недавних? Он снова появится там, если вы откроете его из библиотеки.</item>
+        <item quantity="few">Вы хотите удалить %1$d выбранных файла из списка недавних? Они снова появятся там, если вы откроете их из библиотеки.</item>
+        <item quantity="many">Вы хотите удалить %1$d выбранных файла из списка недавних? Они снова появятся там, если вы откроете их из библиотеки.</item>
+        <item quantity="other">Вы хотите удалить %1$d выбранных файла из списка недавних? Они снова появятся там, если вы откроете их из библиотеки.</item>
+    </plurals>
+    <plurals name="dialog_remove_from_shelf_desc">
+        <item quantity="one">Вы уверены, что хотите убрать %1$d книгу с полки «%2$s»? Книга останется в вашей библиотеке и появится в разделе «Без полки».</item>
+        <item quantity="few">Вы уверены, что хотите убрать %1$d книги с полки «%2$s»? Книги останутся в вашей библиотеке и появится в разделе «Без полки».</item>
+        <item quantity="many">Вы уверены, что хотите убрать %1$d книг с полки «%2$s»? Книги останутся в вашей библиотеке и появится в разделе «Без полки».</item>
+        <item quantity="other">Вы уверены, что хотите убрать %1$d книг с полки «%2$s»? Книги останутся в вашей библиотеке и появится в разделе «Без полки».</item>
+    </plurals>
+    <plurals name="banner_books_removed_library">
+        <item quantity="one">%1$d книга удалены из библиотеки.</item>
+        <item quantity="few">%1$d книги удалены из библиотеки.</item>
+        <item quantity="many">%1$d книг удалены из библиотеки.</item>
+        <item quantity="other">%1$d книг удалены из библиотеки.</item>
+    </plurals>
 </resources>
