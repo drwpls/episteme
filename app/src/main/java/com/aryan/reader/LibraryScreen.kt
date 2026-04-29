@@ -64,6 +64,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.LibraryBooks
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
@@ -76,6 +78,7 @@ import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
@@ -131,6 +134,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.aryan.reader.data.RecentFileItem
+import com.aryan.reader.data.TagEntity
 import com.aryan.reader.opds.OpdsAcquisition
 import com.aryan.reader.opds.OpdsCatalog
 import com.aryan.reader.opds.OpdsEntry
@@ -159,7 +163,7 @@ fun LibraryScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val selectedItems = uiState.contextualActionItems
     val isContextualModeActive = selectedItems.isNotEmpty()
-    val selectedShelves = uiState.contextualActionShelfNames
+    val selectedShelves = uiState.contextualActionShelfIds
     val isShelfContextualModeActive = selectedShelves.isNotEmpty()
     val sortOrder = uiState.sortOrder
     val shelves = uiState.shelves
@@ -278,6 +282,7 @@ fun LibraryScreen(
             selectedShelves = selectedShelves,
             sortOrder = sortOrder,
             libraryFilters = uiState.libraryFilters,
+            allTags = uiState.allTags,
             pinnedLibraryBookIds = uiState.pinnedLibraryBookIds,
             pagerState = pagerState,
             scope = scope,
@@ -289,6 +294,7 @@ fun LibraryScreen(
             onFilterClick = { showFilterSheet = true },
             onClearFilters = { viewModel.updateLibraryFilters(LibraryFilters()) },
             onRemoveFilter = { viewModel.updateLibraryFilters(it) },
+            onTagClick = { viewModel.openTagSelection(selectedItems.map { it.bookId }.toSet()) },
             onPinClick = { viewModel.togglePinForContextualItems(isHome = false) },
             onClearSelection = { viewModel.clearContextualAction() },
             onItemClick = viewModel::onRecentFileClicked,
@@ -358,6 +364,7 @@ fun LibraryScreen(
         if (showFilterSheet) {
             LibraryFilterSheet(
                 filters = uiState.libraryFilters,
+                allTags = uiState.allTags,
                 syncedFolders = uiState.syncedFolders,
                 onApply = { viewModel.updateLibraryFilters(it) },
                 onDismiss = { showFilterSheet = false }
@@ -385,7 +392,8 @@ fun LibraryScreen(
                     },
                     onUpdateName = { newName ->
                         viewModel.updateCustomName(item.bookId, newName)
-                    }
+                    },
+                    onOpenTags = { viewModel.openTagSelection(setOf(item.bookId)) }
                 )
             }
         }
@@ -399,7 +407,7 @@ fun ShelfScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val selectedItems = uiState.contextualActionItems
-    val viewingShelfName = uiState.viewingShelfName
+    val viewingShelfId = uiState.viewingShelfId
     val isAddingBooks = uiState.isAddingBooksToShelf
     val shelves = uiState.shelves
     val sortOrder = uiState.sortOrder
@@ -414,17 +422,20 @@ fun ShelfScreen(
         when {
             selectedItems.isNotEmpty() -> viewModel.clearContextualAction()
             isAddingBooks -> viewModel.dismissAddBooksToShelf()
-            else -> viewModel.unselectShelf()
+            else -> viewModel.navigateBackFromShelf()
         }
     }
 
-    val currentShelf = shelves.find { it.name == viewingShelfName }
+    val currentShelf = shelves.find { it.id == viewingShelfId }
+    val childShelves = remember(shelves, currentShelf) {
+        currentShelf?.childShelfIds?.mapNotNull { childId -> shelves.find { it.id == childId } } ?: emptyList()
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        if (viewingShelfName != null && currentShelf != null) {
+        if (viewingShelfId != null && currentShelf != null) {
             if (isAddingBooks) {
                 AddBooksModeScreen(
-                    shelfName = viewingShelfName,
+                    shelfName = currentShelf.name,
                     availableBooks = uiState.booksAvailableForAdding,
                     selectedBookUris = uiState.booksSelectedForAdding,
                     currentSource = uiState.addBooksSource,
@@ -433,20 +444,23 @@ fun ShelfScreen(
                     onSourceChange = viewModel::setAddBooksSource,
                     onBookClick = { item -> viewModel.toggleBookSelectionForAdding(item.bookId) },
                     onBack = viewModel::dismissAddBooksToShelf,
-                    onAddSelectedBooks = { viewModel.addBooksToShelf(viewingShelfName) },
+                    onAddSelectedBooks = { viewModel.addBooksToShelf(viewingShelfId) },
                     downloadingBookIds = uiState.downloadingBookIds
                 )
             } else {
                 ShelfDetailScreen(
                     shelf = currentShelf,
+                    childShelves = childShelves,
                     selectedItems = selectedItems,
                     sortOrder = sortOrder,
                     onSortOrderChange = viewModel::setSortOrder,
-                    onBack = viewModel::unselectShelf,
+                    onBack = viewModel::navigateBackFromShelf,
                     onAddBooksClick = viewModel::showAddBooksToShelf,
+                    onChildShelfClick = viewModel::onShelfClick,
                     onBookClick = viewModel::onRecentFileClicked,
                     onBookLongClick = viewModel::onRecentItemLongPress,
                     onClearSelection = viewModel::clearContextualAction,
+                    onTagClick = { viewModel.openTagSelection(selectedItems.map { it.bookId }.toSet()) },
                     onInfoClick = {
                         if (selectedItems.size == 1) {
                             itemForInfoDialog = selectedItems.first()
@@ -454,24 +468,27 @@ fun ShelfScreen(
                         }
                     },
                     onDeleteClick = { showRemoveFromShelfDialog = true },
-                    onRenameShelf = { viewModel.showRenameShelfDialog(currentShelf.name) },
-                    onDeleteShelf = { viewModel.showDeleteShelfDialog(currentShelf.name) },
+                    onRenameShelf = { viewModel.showRenameShelfDialog(currentShelf.id) },
+                    onDeleteShelf = { viewModel.showDeleteShelfDialog(currentShelf.id) },
                     downloadingBookIds = uiState.downloadingBookIds
                 )
             }
         }
 
         if (showRenameDialogFor != null) {
-            RenameShelfDialog(
-                initialName = showRenameDialogFor,
-                onConfirm = { newName -> viewModel.renameShelf(showRenameDialogFor, newName) },
-                onDismiss = viewModel::dismissRenameShelfDialog
-            )
+            val shelfToRename = shelves.find { it.id == showRenameDialogFor }
+            if (shelfToRename != null) {
+                RenameShelfDialog(
+                    initialName = shelfToRename.name,
+                    onConfirm = { newName -> viewModel.renameShelf(showRenameDialogFor, newName) },
+                    onDismiss = viewModel::dismissRenameShelfDialog
+                )
+            }
         }
 
         if (showDeleteDialogFor != null) {
             DeleteShelfConfirmationDialog(
-                shelfName = showDeleteDialogFor,
+                shelfName = shelves.find { it.id == showDeleteDialogFor }?.name ?: "",
                 onConfirm = { viewModel.deleteShelf(showDeleteDialogFor) },
                 onDismiss = viewModel::dismissDeleteShelfDialog
             )
@@ -493,13 +510,9 @@ fun ShelfScreen(
             if (showInfoDialog) {
                 FileInfoDialog(
                     item = item,
-                    onDismiss = {
-                        showInfoDialog = false
-                        itemForInfoDialog = null
-                    },
-                    onUpdateName = { newName ->
-                        viewModel.updateCustomName(item.bookId, newName)
-                    }
+                    onDismiss = { showInfoDialog = false; itemForInfoDialog = null },
+                    onUpdateName = { newName -> viewModel.updateCustomName(item.bookId, newName) },
+                    onOpenTags = { viewModel.openTagSelection(setOf(item.bookId)) }
                 )
             }
         }
@@ -519,6 +532,7 @@ fun LibraryScreenContent(
     selectedShelves: Set<String>,
     sortOrder: SortOrder,
     libraryFilters: LibraryFilters,
+    allTags: List<TagEntity>,
     pinnedLibraryBookIds: Set<String>,
     pagerState: PagerState,
     scope: CoroutineScope,
@@ -530,6 +544,7 @@ fun LibraryScreenContent(
     onFilterClick: () -> Unit,
     onClearFilters: () -> Unit,
     onRemoveFilter: (LibraryFilters) -> Unit,
+    onTagClick: () -> Unit,
     onPinClick: () -> Unit,
     onClearSelection: () -> Unit,
     onItemClick: (RecentFileItem) -> Unit,
@@ -590,6 +605,7 @@ fun LibraryScreenContent(
                     ContextualTopAppBar(
                         selectedItemCount = selectedItems.size,
                         onNavIconClick = onClearSelection,
+                        onTagClick = onTagClick,
                         onPinClick = onPinClick,
                         onInfoClick = onInfoClick,
                         onDeleteClick = onDeleteClick,
@@ -734,6 +750,19 @@ fun LibraryScreenContent(
                                     trailingIcon = { Icon(Icons.Default.Close, contentDescription = "Clear", modifier = Modifier.size(16.dp)) }
                                 )
                             }
+                            if (libraryFilters.tagIds.isNotEmpty()) {
+                                val selectedTags = allTags.filter { it.id in libraryFilters.tagIds }
+                                val tagLabel = when {
+                                    selectedTags.isEmpty() -> "${libraryFilters.tagIds.size} tags"
+                                    selectedTags.size <= 2 -> selectedTags.joinToString { it.name }
+                                    else -> "${selectedTags.size} tags"
+                                }
+                                AssistChip(
+                                    onClick = { onRemoveFilter(libraryFilters.copy(tagIds = emptySet())) },
+                                    label = { Text("Tags: $tagLabel") },
+                                    trailingIcon = { Icon(Icons.Default.Close, contentDescription = "Clear", modifier = Modifier.size(16.dp)) }
+                                )
+                            }
                         }
                     }
                 }
@@ -846,16 +875,60 @@ private fun ShelvesScreen(
     onShelfLongClick: (Shelf) -> Unit,
     selectedShelves: Set<String>,
 ) {
+    val tagShelves = remember(shelves) { shelves.filter { it.type == ShelfType.TAG && it.bookCount > 0 } }
+    val visibleShelves = remember(shelves) {
+        shelves.filter { shelf ->
+            when {
+                shelf.type == ShelfType.TAG -> false
+                shelf.type == ShelfType.FOLDER -> shelf.parentShelfId == null
+                else -> true
+            }
+        }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 88.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        items(shelves, key = { it.name }) { shelf ->
+        if (tagShelves.isNotEmpty() && selectedShelves.isEmpty()) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Browse by tag",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        tagShelves.forEach { shelf ->
+                            FilterChip(
+                                selected = false,
+                                onClick = { onShelfClick(shelf) },
+                                label = { Text(shelf.name) },
+                                leadingIcon = {
+                                    Icon(
+                                        painter = painterResource(id = R.drawable.tag),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        items(visibleShelves, key = { it.id }) { shelf ->
             ShelfListItem(
                 shelf = shelf,
-                isSelected = shelf.name in selectedShelves,
+                isSelected = shelf.id in selectedShelves,
                 onItemClick = { onShelfClick(shelf) },
                 onItemLongClick = { onShelfLongClick(shelf) }
             )
@@ -904,14 +977,17 @@ private fun CreateShelfDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit
 @Composable
 private fun ShelfDetailScreen(
     shelf: Shelf,
+    childShelves: List<Shelf>,
     selectedItems: Set<RecentFileItem>,
     sortOrder: SortOrder,
     onSortOrderChange: (SortOrder) -> Unit,
     onBack: () -> Unit,
     onAddBooksClick: () -> Unit,
+    onChildShelfClick: (Shelf) -> Unit,
     onBookClick: (RecentFileItem) -> Unit,
     onBookLongClick: (RecentFileItem) -> Unit,
     onClearSelection: () -> Unit,
+    onTagClick: () -> Unit,
     onInfoClick: () -> Unit,
     onDeleteClick: () -> Unit,
     onRenameShelf: () -> Unit,
@@ -919,8 +995,71 @@ private fun ShelfDetailScreen(
     downloadingBookIds: Set<String>,
 ) {
     val isContextualModeActive = selectedItems.isNotEmpty()
+    val isFolderShelf = shelf.type == ShelfType.FOLDER
     var showSortMenu by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
+    var isSearchActive by remember(shelf.id) { mutableStateOf(false) }
+    var searchQuery by remember(shelf.id) { mutableStateOf("") }
+    val searchFocusRequester = remember { FocusRequester() }
+    var searchFieldValue by remember(isSearchActive, shelf.id) {
+        mutableStateOf(TextFieldValue(searchQuery, TextRange(searchQuery.length)))
+    }
+    val normalizedQuery = searchQuery.trim()
+    val filteredChildShelves = remember(childShelves, normalizedQuery) {
+        if (normalizedQuery.isBlank()) {
+            childShelves
+        } else {
+            childShelves.filter { childShelf ->
+                childShelf.name.contains(normalizedQuery, ignoreCase = true) ||
+                    childShelf.books.any { item ->
+                        item.displayName.contains(normalizedQuery, ignoreCase = true) ||
+                            item.title?.contains(normalizedQuery, ignoreCase = true) == true ||
+                            item.author?.contains(normalizedQuery, ignoreCase = true) == true
+                    }
+            }
+        }
+    }
+    val filteredDirectBooks = remember(shelf.directBooks, normalizedQuery) {
+        if (normalizedQuery.isBlank()) {
+            shelf.directBooks
+        } else {
+            shelf.directBooks.filter { item ->
+                item.displayName.contains(normalizedQuery, ignoreCase = true) ||
+                    item.title?.contains(normalizedQuery, ignoreCase = true) == true ||
+                    item.author?.contains(normalizedQuery, ignoreCase = true) == true ||
+                    item.tags.any { tag -> tag.name.contains(normalizedQuery, ignoreCase = true) }
+            }
+        }
+    }
+
+    LaunchedEffect(searchQuery) {
+        if (searchFieldValue.text != searchQuery) {
+            searchFieldValue = searchFieldValue.copy(
+                text = searchQuery,
+                selection = TextRange(searchQuery.length)
+            )
+        }
+    }
+
+    LaunchedEffect(isSearchActive) {
+        if (isSearchActive) {
+            searchFocusRequester.requestFocus()
+        }
+    }
+
+    fun clearShelfSearchQuery() {
+        searchQuery = ""
+        searchFieldValue = TextFieldValue("", TextRange.Zero)
+    }
+
+    fun closeShelfSearch() {
+        isSearchActive = false
+        clearShelfSearchQuery()
+    }
+
+    BackHandler(enabled = isSearchActive) {
+        closeShelfSearch()
+    }
 
     Scaffold(
         modifier = Modifier,
@@ -929,9 +1068,54 @@ private fun ShelfDetailScreen(
                 ContextualTopAppBar(
                     selectedItemCount = selectedItems.size,
                     onNavIconClick = onClearSelection,
+                    onTagClick = onTagClick,
                     onInfoClick = onInfoClick,
                     onDeleteClick = onDeleteClick
                 )
+            } else if (isSearchActive) {
+                Surface(
+                    shadowElevation = 4.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .height(64.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { closeShelfSearch() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close search")
+                        }
+                        OutlinedTextField(
+                            value = searchFieldValue,
+                            onValueChange = {
+                                searchFieldValue = it
+                                searchQuery = it.text
+                            },
+                            placeholder = { Text(stringResource(R.string.search_placeholder)) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(vertical = 4.dp)
+                                .focusRequester(searchFocusRequester),
+                            singleLine = true,
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent,
+                                disabledContainerColor = Color.Transparent,
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent,
+                            ),
+                            trailingIcon = {
+                                if (searchQuery.isNotEmpty()) {
+                                    IconButton(onClick = { clearShelfSearchQuery() }) {
+                                        Icon(Icons.Default.Close, contentDescription = "Clear query")
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
             } else {
                 CustomTopAppBar(
                     title = {
@@ -942,7 +1126,14 @@ private fun ShelfDetailScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = getBookCountString(shelf.bookCount),
+                                text = when {
+                                    isFolderShelf && shelf.childShelfCount > 0 && shelf.directBookCount > 0 ->
+                                        "${shelf.childShelfCount} folders • ${getBookCountString(shelf.directBookCount)}"
+                                    isFolderShelf && shelf.childShelfCount > 0 ->
+                                        "${shelf.childShelfCount} folders"
+                                    isFolderShelf -> getBookCountString(shelf.directBookCount)
+                                    else -> getBookCountString(shelf.bookCount)
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -988,7 +1179,14 @@ private fun ShelfDetailScreen(
                             }
                         }
 
-                        if (shelf.name != "Unshelved") {
+                        IconButton(onClick = { isSearchActive = true }) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = "Search shelf"
+                            )
+                        }
+
+                        if (shelf.type == ShelfType.MANUAL && shelf.id != "unshelved") {
                             Box {
                                 IconButton(onClick = { showMoreMenu = true }) {
                                     Icon(
@@ -1022,40 +1220,81 @@ private fun ShelfDetailScreen(
             }
         },
         floatingActionButton = {
-            if (shelf.name != "Unshelved" && !isContextualModeActive) {
+            if (shelf.type == ShelfType.MANUAL && shelf.id != "unshelved" && !isContextualModeActive) {
                 ExtendedFloatingActionButton(
                     onClick = onAddBooksClick,
                     icon = { Icon(Icons.Default.Add, contentDescription = null) },
                     text = { Text(stringResource(R.string.fab_add_books)) }
                 )
             }
-        }
-    ) { paddingValues ->
-        if (shelf.books.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(stringResource(R.string.shelf_empty), style = MaterialTheme.typography.bodyLarge)
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(paddingValues),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(shelf.books, key = { it.bookId }) { item ->
-                    LibraryListItem(
-                        item = item,
-                        isSelected = selectedItems.any { it.bookId == item.bookId },
-                        onItemClick = { onBookClick(item) },
-                        onItemLongClick = { onBookLongClick(item) },
-                        isDownloading = item.bookId in downloadingBookIds
+        },
+        content = { paddingValues ->
+            if (filteredChildShelves.isEmpty() && filteredDirectBooks.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(paddingValues),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (normalizedQuery.isBlank()) stringResource(R.string.shelf_empty) else stringResource(
+                            R.string.no_results_found,
+                            normalizedQuery
+                        ),
+                        style = MaterialTheme.typography.bodyLarge
                     )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().padding(paddingValues),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (filteredChildShelves.isNotEmpty()) {
+                        if (isFolderShelf) {
+                            item {
+                                Text(
+                                    text = "Folders",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        items(filteredChildShelves, key = { it.id }) { childShelf ->
+                            ShelfListItem(
+                                shelf = childShelf,
+                                isSelected = false,
+                                onItemClick = { onChildShelfClick(childShelf) },
+                                onItemLongClick = {},
+                                showHierarchyIndent = false
+                            )
+                        }
+                    }
+                    if (filteredDirectBooks.isNotEmpty() && isFolderShelf && filteredChildShelves.isNotEmpty()) {
+                        item {
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        item {
+                            Text(
+                                text = "Files",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    items(filteredDirectBooks, key = { it.bookId }) { item ->
+                        LibraryListItem(
+                            item = item,
+                            isSelected = selectedItems.any { it.bookId == item.bookId },
+                            onItemClick = { onBookClick(item) },
+                            onItemLongClick = { onBookLongClick(item) },
+                            isDownloading = item.bookId in downloadingBookIds
+                        )
+                    }
                 }
             }
         }
-    }
+    )
 }
 
 @Composable
@@ -1073,76 +1312,67 @@ private fun AddBooksModeScreen(
     downloadingBookIds: Set<String>,
 ) {
     var showSortMenu by remember { mutableStateOf(false) }
-    var showSourceMenu by remember { mutableStateOf(false) }
 
     Scaffold(
         modifier = Modifier,
         topBar = {
-            CustomTopAppBar(
-                title = { Text(stringResource(R.string.add_to_shelf, shelfName)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                actions = {
-                    Box {
-                        TextButton(onClick = { showSortMenu = true }) {
-                            Icon(
-                                painter = painterResource(id = R.drawable.sort),
-                                contentDescription = "Sort",
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(sortOrder.displayName)
+            Column {
+                CustomTopAppBar(
+                    title = { Text(stringResource(R.string.add_to_shelf, shelfName)) },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
-                        DropdownMenu(
-                            expanded = showSortMenu,
-                            onDismissRequest = { showSortMenu = false }
-                        ) {
-                            SortOrder.entries.forEach { order ->
-                                DropdownMenuItem(
-                                    text = { Text(order.displayName) },
-                                    onClick = {
-                                        onSortOrderChange(order)
-                                        showSortMenu = false
-                                    },
-                                    trailingIcon = {
-                                        if (order == sortOrder) {
-                                            Icon(Icons.Default.Check, contentDescription = "Selected")
-                                        }
-                                    }
+                    },
+                    actions = {
+                        Box {
+                            TextButton(onClick = { showSortMenu = true }) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.sort),
+                                    contentDescription = "Sort",
+                                    modifier = Modifier.size(20.dp)
                                 )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(sortOrder.displayName)
+                            }
+                            DropdownMenu(
+                                expanded = showSortMenu,
+                                onDismissRequest = { showSortMenu = false }
+                            ) {
+                                SortOrder.entries.forEach { order ->
+                                    DropdownMenuItem(
+                                        text = { Text(order.displayName) },
+                                        onClick = {
+                                            onSortOrderChange(order)
+                                            showSortMenu = false
+                                        },
+                                        trailingIcon = {
+                                            if (order == sortOrder) {
+                                                Icon(Icons.Default.Check, contentDescription = "Selected")
+                                            }
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
-
-                    Box {
-                        IconButton(onClick = { showSourceMenu = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More options")
-                        }
-                        DropdownMenu(
-                            expanded = showSourceMenu,
-                            onDismissRequest = { showSourceMenu = false }
-                        ) {
-                            AddBooksSource.entries.forEach { source ->
-                                DropdownMenuItem(
-                                    text = { Text(source.displayName) },
-                                    onClick = {
-                                        onSourceChange(source)
-                                        showSourceMenu = false
-                                    },
-                                    trailingIcon = {
-                                        if (source == currentSource) {
-                                            Icon(Icons.Default.Check, contentDescription = "Selected")
-                                        }
-                                    }
-                                )
-                            }
-                        }
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AddBooksSource.entries.forEach { source ->
+                        FilterChip(
+                            selected = source == currentSource,
+                            onClick = { onSourceChange(source) },
+                            label = { Text(source.displayName) }
+                        )
                     }
                 }
-            )
+            }
         },
         floatingActionButton = {
             if (selectedBookUris.isNotEmpty()) {
@@ -1152,37 +1382,42 @@ private fun AddBooksModeScreen(
                     onClick = onAddSelectedBooks
                 )
             }
-        }
-    ) { paddingValues ->
-        if (availableBooks.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = if (currentSource == AddBooksSource.UNSHELVED) stringResource(R.string.no_unshelved_books) else stringResource(R.string.all_books_in_shelf),
-                    style = MaterialTheme.typography.bodyLarge
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(paddingValues),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 88.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(availableBooks, key = { it.bookId }) { item ->
-                    val isSelected = item.bookId in selectedBookUris
-                    LibraryListItem(
-                        item = item,
-                        isSelected = isSelected,
-                        onItemClick = { onBookClick(item) },
-                        onItemLongClick = { onBookClick(item) },
-                        isDownloading = item.bookId in downloadingBookIds
+        },
+        content = { paddingValues ->
+            if (availableBooks.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(paddingValues),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (currentSource == AddBooksSource.UNSHELVED) {
+                            stringResource(R.string.no_unshelved_books)
+                        } else {
+                            stringResource(R.string.all_books_in_shelf)
+                        },
+                        style = MaterialTheme.typography.bodyLarge
                     )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().padding(paddingValues),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 88.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(availableBooks, key = { it.bookId }) { item ->
+                        val isSelected = item.bookId in selectedBookUris
+                        LibraryListItem(
+                            item = item,
+                            isSelected = isSelected,
+                            onItemClick = { onBookClick(item) },
+                            onItemLongClick = { onBookClick(item) },
+                            isDownloading = item.bookId in downloadingBookIds
+                        )
+                    }
                 }
             }
         }
-    }
+    )
 }
 
 @Composable
@@ -1260,7 +1495,10 @@ private fun ShelfListItem(
     isSelected: Boolean,
     onItemClick: () -> Unit,
     onItemLongClick: () -> Unit,
+    showHierarchyIndent: Boolean = true,
 ) {
+    val folderIndent = if (showHierarchyIndent && shelf.type == ShelfType.FOLDER) (shelf.depth * 14).dp else 0.dp
+
     androidx.compose.material3.ElevatedCard(
         shape = MaterialTheme.shapes.large,
         colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
@@ -1286,7 +1524,7 @@ private fun ShelfListItem(
             )
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(start = 12.dp + folderIndent, end = 12.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             ShelfCover(shelf = shelf)
@@ -1294,13 +1532,29 @@ private fun ShelfListItem(
             Spacer(modifier = Modifier.width(16.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = shelf.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val icon = when (shelf.type) {
+                        ShelfType.SMART -> Icons.Default.Star
+                        ShelfType.TAG -> Icons.AutoMirrored.Filled.LibraryBooks
+                        ShelfType.FOLDER -> Icons.Default.Folder
+                        ShelfType.SERIES -> Icons.AutoMirrored.Filled.LibraryBooks
+                        ShelfType.MANUAL -> Icons.AutoMirrored.Filled.List
+                    }
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = shelf.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = getBookCountString(shelf.bookCount),
@@ -1378,7 +1632,6 @@ private fun LibraryListItem(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
-
                 if (isSelected) {
                     Box(
                         modifier = Modifier.matchParentSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)),
@@ -1432,57 +1685,60 @@ private fun LibraryListItem(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     FileTypeBadge(type = item.type, overlay = false)
 
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(28.dp),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        if (!item.isAvailable) {
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = if (isDownloading) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.errorContainer
-                                },
-                                contentColor = if (isDownloading) {
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onErrorContainer
-                                }
+                    if (item.tags.isNotEmpty()) {
+                        BookTagChipsRow(
+                            tags = item.tags,
+                            compact = true,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+
+                    if (!item.isAvailable) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (isDownloading) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.errorContainer
+                            },
+                            contentColor = if (isDownloading) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onErrorContainer
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    if (isDownloading) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(14.dp),
-                                            strokeWidth = 2.dp
-                                        )
-                                    } else {
-                                        Icon(
-                                            Icons.Filled.Info,
-                                            contentDescription = stringResource(R.string.not_available_locally),
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                    Text(
-                                        text = if (isDownloading) {
-                                            stringResource(R.string.status_downloading)
-                                        } else {
-                                            stringResource(R.string.not_available_locally)
-                                        },
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Medium
+                                if (isDownloading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Filled.Info,
+                                        contentDescription = stringResource(R.string.not_available_locally),
+                                        modifier = Modifier.size(14.dp)
                                     )
                                 }
+                                Text(
+                                    text = if (isDownloading) {
+                                        stringResource(R.string.status_downloading)
+                                    } else {
+                                        stringResource(R.string.not_available_locally)
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Medium
+                                )
                             }
                         }
                     }
@@ -1558,7 +1814,7 @@ private fun DeleteShelfConfirmationDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.dialog_delete_shelf)) },
-        text = { Text(stringResource(R.string.dialog_delete_shelf_desc)) },
+        text = { Text(stringResource(R.string.dialog_delete_shelf_desc, shelfName)) },
         confirmButton = {
             TextButton(onClick = onConfirm) { Text(stringResource(R.string.action_delete)) }
         },
@@ -1912,6 +2168,7 @@ private fun EditFolderFiltersDialog(
 @Composable
 fun LibraryFilterSheet(
     filters: LibraryFilters,
+    allTags: List<TagEntity>,
     syncedFolders: List<SyncedFolder>,
     onApply: (LibraryFilters) -> Unit,
     onDismiss: () -> Unit
@@ -1984,6 +2241,41 @@ fun LibraryFilterSheet(
                         onClick = { currentFilters = currentFilters.copy(readStatus = status) },
                         label = { Text(status.displayName) }
                     )
+                }
+            }
+
+            if (allTags.isNotEmpty()) {
+                Text("Tags", style = MaterialTheme.typography.titleMedium)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    allTags.forEach { tag ->
+                        val selected = tag.id in currentFilters.tagIds
+                        FilterChip(
+                            selected = selected,
+                            onClick = {
+                                val newSet = if (selected) {
+                                    currentFilters.tagIds - tag.id
+                                } else {
+                                    currentFilters.tagIds + tag.id
+                                }
+                                currentFilters = currentFilters.copy(tagIds = newSet)
+                            },
+                            label = { Text(tag.name) },
+                            leadingIcon = {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .background(
+                                            Color(tag.color ?: 0xFF64B5F6.toInt()),
+                                            CircleShape
+                                        )
+                                )
+                            }
+                        )
+                    }
                 }
             }
 

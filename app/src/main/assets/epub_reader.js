@@ -79,7 +79,7 @@
             }
 
             img, svg, video, canvas {
-                max-width: 100%; width: 100%; height: auto; display: block; margin-left: auto; margin-right: auto; background-color: transparent; object-fit: contain;
+                max-width: 100%; width: auto; height: auto; display: block; margin-left: auto; margin-right: auto; background-color: transparent; object-fit: contain;
             }
 
             figure img {
@@ -481,10 +481,18 @@
         if (anchor) {
             var href = anchor.getAttribute('href');
             var epubType = anchor.getAttribute('epub:type');
+            var linkText = (anchor.textContent || '').trim().substring(0, 80);
+
+            console.log("LINK_NAV: [JS-CLICK] href='" + href + "', epub:type='" + epubType + "', label='" + linkText + "'");
+
+            if (window.LinkNavBridge && window.LinkNavBridge.onLinkClicked) {
+                window.LinkNavBridge.onLinkClicked(href || '', epubType || '', linkText);
+            }
 
             console.log("FootnoteDiag: Link clicked. href: '" + href + "', epub:type: '" + epubType + "'");
 
-            if ((href && href.startsWith('#')) || epubType === 'noteref') {
+           if ((href && href.startsWith('#')) || epubType === 'noteref') {
+               console.log("LINK_NAV: [JS-CLASSIFY] type=FRAGMENT_OR_FOOTNOTE, href='" + href + "'");
                 var targetId = href ? href.substring(1) : null;
                 console.log("FootnoteDiag: Extracted targetId: '" + targetId + "'");
 
@@ -504,10 +512,12 @@
                     }
                 }
             }
+        } else {
+            console.log("LINK_NAV: [JS-NO-ANCHOR] No <a> tag found in click target hierarchy");
         }
     }, true);
 
-    window.updateReaderStyles = function (fontSizeEm, lineHeight, fontFamily, textAlign, paragraphGap) {
+    window.updateReaderStyles = function (fontSizeEm, lineHeight, fontFamily, textAlign, paragraphGap, imageSize, horizontalMargin) {
         var logTag = "ReaderFontDiagnosis";
         console.log(
             logTag +
@@ -517,11 +527,15 @@
                 lineHeight +
                 ", Font: '" +
                 fontFamily +
-                "', Align: '" +
-                textAlign +
-                "', Gap: " +
-                paragraphGap
-        );
+                  "', Align: '" +
+                  textAlign +
+                  "', Gap: " +
+                  paragraphGap +
+                  ", ImageSize: " +
+                  imageSize +
+                  ", HorizontalMargin: " +
+                  horizontalMargin
+          );
 
         var dynamicStyleId = "dynamicReaderStyles";
         var dynamicStyleElement = document.getElementById(dynamicStyleId);
@@ -535,10 +549,14 @@
         var newFontSize = parseFloat(fontSizeEm);
         var newLineHeight = parseFloat(lineHeight);
         var newGap = parseFloat(paragraphGap);
+        var newImageSize = parseFloat(imageSize);
+        var newHorizontalMargin = parseFloat(horizontalMargin);
 
         if (isNaN(newFontSize) || newFontSize < 0.5 || newFontSize > 5.0) newFontSize = 1.0;
         if (isNaN(newLineHeight) || newLineHeight < 1.0 || newLineHeight > 3.0) newLineHeight = 1.0;
         if (isNaN(newGap) || newGap < 0.0 || newGap > 3.0) newGap = 1.0;
+        if (isNaN(newImageSize) || newImageSize < 0.5 || newImageSize > 2.0) newImageSize = 1.0;
+        if (isNaN(newHorizontalMargin) || newHorizontalMargin < 0.0 || newHorizontalMargin > 3.0) newHorizontalMargin = 1.0;
 
         var fontCss = "";
         if (fontFamily && fontFamily !== "Original" && fontFamily !== "") {
@@ -590,7 +608,31 @@
             `;
         }
 
-        dynamicStyleElement.innerHTML = [sizeCss, lineHeightCss, fontCss, alignCss, gapCss].join("\n");
+        var horizontalPaddingPx = Math.max(0, 16 * newHorizontalMargin);
+        var horizontalMarginCss = `
+            body {
+                box-sizing: border-box !important;
+                padding-left: ${horizontalPaddingPx}px !important;
+                padding-right: ${horizontalPaddingPx}px !important;
+            }
+        `;
+
+        var imageCss = `
+            :root {
+                --reader-image-size: ${newImageSize};
+            }
+            body img,
+            body svg,
+            body video,
+            body canvas,
+            body image {
+                width: min(100%, calc(100% * var(--reader-image-size))) !important;
+                max-width: 100% !important;
+                height: auto !important;
+            }
+        `;
+
+        dynamicStyleElement.innerHTML = [sizeCss, lineHeightCss, fontCss, alignCss, gapCss, imageCss, horizontalMarginCss].join("\n");
 
         setTimeout(
             function () {

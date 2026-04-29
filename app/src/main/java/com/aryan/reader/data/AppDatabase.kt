@@ -27,11 +27,24 @@ import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities =[RecentFileEntity::class, CustomFontEntity::class], version = 16, exportSchema = false)
+@Database(
+    entities =[
+        RecentFileEntity::class,
+        CustomFontEntity::class,
+        ShelfEntity::class,
+        BookShelfCrossRef::class,
+        TagEntity::class,
+        BookTagCrossRef::class
+    ],
+    version = 18,
+    exportSchema = false
+)
 @TypeConverters(FileTypeConverter::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun recentFileDao(): RecentFileDao
     abstract fun customFontDao(): CustomFontDao
+    abstract fun shelfDao(): ShelfDao
+    abstract fun tagDao(): TagDao
 
     companion object {
         @Volatile
@@ -191,6 +204,53 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE recent_files ADD COLUMN seriesName TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE recent_files ADD COLUMN seriesIndex REAL DEFAULT NULL")
+                db.execSQL("ALTER TABLE recent_files ADD COLUMN description TEXT DEFAULT NULL")
+            }
+        }
+
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `shelves` (
+                        `id` TEXT NOT NULL, `name` TEXT NOT NULL, `isSmart` INTEGER NOT NULL, 
+                        `smartRulesJson` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, 
+                        `isDeleted` INTEGER NOT NULL, PRIMARY KEY(`id`)
+                    )
+                """)
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `tags` (
+                        `id` TEXT NOT NULL, `name` TEXT NOT NULL, `color` INTEGER, 
+                        `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`)
+                    )
+                """)
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `book_shelf_cross_ref` (
+                        `bookId` TEXT NOT NULL, `shelfId` TEXT NOT NULL, `addedAt` INTEGER NOT NULL, 
+                        PRIMARY KEY(`bookId`, `shelfId`),
+                        FOREIGN KEY(`bookId`) REFERENCES `recent_files`(`bookId`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(`shelfId`) REFERENCES `shelves`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """)
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_book_shelf_cross_ref_shelfId` ON `book_shelf_cross_ref` (`shelfId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_book_shelf_cross_ref_bookId` ON `book_shelf_cross_ref` (`bookId`)")
+
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `book_tag_cross_ref` (
+                        `bookId` TEXT NOT NULL, `tagId` TEXT NOT NULL, 
+                        PRIMARY KEY(`bookId`, `tagId`),
+                        FOREIGN KEY(`bookId`) REFERENCES `recent_files`(`bookId`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(`tagId`) REFERENCES `tags`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """)
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_book_tag_cross_ref_tagId` ON `book_tag_cross_ref` (`tagId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_book_tag_cross_ref_bookId` ON `book_tag_cross_ref` (`bookId`)")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -202,7 +262,8 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                         MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
                         MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
-                        MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16
+                        MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+                        MIGRATION_16_17, MIGRATION_17_18
                     )
                     .fallbackToDestructiveMigration(false)
                     .build()

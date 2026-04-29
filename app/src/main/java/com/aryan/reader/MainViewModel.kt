@@ -35,18 +35,15 @@ import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.edit
+import androidx.core.graphics.createBitmap
 import androidx.core.net.toUri
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import kotlinx.coroutines.withTimeoutOrNull
 import androidx.credentials.exceptions.NoCredentialException
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.work.Constraints
-import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.aryan.reader.data.CloudflareRepository
@@ -61,12 +58,19 @@ import com.aryan.reader.data.RecentFileItem
 import com.aryan.reader.data.RecentFilesRepository
 import com.aryan.reader.data.RemoteConfigRepository
 import com.aryan.reader.data.ShelfMetadata
+import com.aryan.reader.data.SmartCollectionEngine
+import com.aryan.reader.data.TagEntity
 import com.aryan.reader.data.toBookMetadata
 import com.aryan.reader.data.toRecentFileItem
+import com.aryan.reader.epub.CalibreBundleExtractor
+import com.aryan.reader.epub.CalibreBundleResult
 import com.aryan.reader.epub.EpubBook
 import com.aryan.reader.epub.EpubParser
+import com.aryan.reader.epub.ImportedFileCache
 import com.aryan.reader.epub.MobiParser
 import com.aryan.reader.epub.SingleFileImporter
+import com.aryan.reader.ml.ISpeechBubbleDetector
+import com.aryan.reader.ml.SpeechBubble
 import com.aryan.reader.paginatedreader.Locator
 import com.aryan.reader.paginatedreader.data.BookCacheDatabase
 import com.aryan.reader.paginatedreader.data.BookProcessingWorker
@@ -83,9 +87,12 @@ import com.aryan.reader.pdf.data.PdfTextBoxRepository
 import com.aryan.reader.pdf.data.PdfTextRepository
 import com.aryan.reader.pdf.data.VirtualPage
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
+import io.legere.pdfiumandroid.PdfiumCore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -94,6 +101,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -105,6 +113,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import timber.log.Timber
@@ -112,22 +121,44 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.Date
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CancellationException
-import java.util.concurrent.TimeUnit
-import androidx.core.graphics.createBitmap
-import io.legere.pdfiumandroid.PdfiumCore
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.flow.distinctUntilChanged
 import java.util.concurrent.Executors.newSingleThreadExecutor
+import java.util.concurrent.TimeUnit
 
 private const val KEY_RENDER_MODE = "render_mode"
 private const val KEY_FOLDER_SYNC_ENABLED = "folder_sync_enabled"
+private const val KEY_MAIN_SCREEN_START_PAGE = "main_screen_start_page"
+private const val KEY_LIBRARY_SCREEN_START_PAGE = "library_screen_start_page"
+private const val KEY_LAST_VIEWING_SHELF_ID = "last_viewing_shelf_id"
+private const val KEY_LAST_ADDING_BOOKS_TO_SHELF = "last_adding_books_to_shelf"
 
 private const val KEY_FILTER_FILE_TYPES = "filter_file_types"
 private const val KEY_FILTER_FOLDERS = "filter_folders"
 private const val KEY_FILTER_READ_STATUS = "filter_read_status"
+private const val KEY_FILTER_TAG_IDS = "filter_tag_ids"
+private const val KEY_DEFAULT_TAGS_SEEDED = "default_tags_seeded"
+private val PDF_VIEWER_FILE_TYPES = setOf(FileType.PDF, FileType.CBZ, FileType.CBR, FileType.CB7)
+private val EPUB_READER_FILE_TYPES = setOf(
+    FileType.EPUB,
+    FileType.MOBI,
+    FileType.MD,
+    FileType.TXT,
+    FileType.HTML,
+    FileType.FB2,
+    FileType.DOCX,
+    FileType.ODT,
+    FileType.FODT
+)
 
 data class BannerMessage(val message: String, val isError: Boolean = false, val isPersistent: Boolean = false)
+
+data class ImportResult(
+    val internalUri: Uri,
+    val bookId: String,
+    val type: FileType,
+    val bundleResult: CalibreBundleResult? = null
+)
 
 data class UserData(
     val uid: String, val displayName: String?, val photoUrl: String?, val email: String?
@@ -135,6 +166,19 @@ data class UserData(
 
 data class NavigationEvent(
     val route: String, val bookId: String? = null, val uri: Uri? = null
+)
+
+private data class SpeechBubbleCacheKey(
+    val documentId: String,
+    val pageIndex: Int
+)
+
+private data class CachedSpeechBubble(
+    val leftFraction: Float,
+    val topFraction: Float,
+    val rightFraction: Float,
+    val bottomFraction: Float,
+    val maskBitmap: Bitmap?
 )
 
 enum class AddBooksSource(val displayName: String) {
@@ -177,11 +221,23 @@ data class SyncedFolder(
     val uriString: String, val name: String, val lastScanTime: Long, val allowedFileTypes: Set<FileType> = FileType.entries.toSet()
 )
 
-data class Shelf(val name: String, val books: List<RecentFileItem>) {
-    val bookCount: Int
-        get() = books.size
-    val topBook: RecentFileItem?
-        get() = books.maxByOrNull { it.timestamp }
+enum class ShelfType { MANUAL, SMART, TAG, SERIES, FOLDER }
+
+data class Shelf(
+    val id: String,
+    val name: String,
+    val type: ShelfType,
+    val books: List<RecentFileItem>,
+    val directBooks: List<RecentFileItem> = books,
+    val parentShelfId: String? = null,
+    val childShelfIds: List<String> = emptyList(),
+    val depth: Int = 0,
+    val sortKey: String = name.lowercase()
+) {
+    val bookCount: Int get() = books.size
+    val topBook: RecentFileItem? get() = books.maxByOrNull { it.timestamp }
+    val directBookCount: Int get() = directBooks.size
+    val childShelfCount: Int get() = childShelfIds.size
 }
 
 enum class SortOrder(val displayName: String) {
@@ -201,10 +257,14 @@ enum class ReadStatusFilter(val displayName: String) {
 data class LibraryFilters(
     val fileTypes: Set<FileType> = emptySet(),
     val sourceFolders: Set<String> = emptySet(),
-    val readStatus: ReadStatusFilter = ReadStatusFilter.ALL
+    val readStatus: ReadStatusFilter = ReadStatusFilter.ALL,
+    val tagIds: Set<String> = emptySet()
 ) {
     val isActive: Boolean
-        get() = fileTypes.isNotEmpty() || sourceFolders.isNotEmpty() || readStatus != ReadStatusFilter.ALL
+        get() = fileTypes.isNotEmpty() ||
+            sourceFolders.isNotEmpty() ||
+            readStatus != ReadStatusFilter.ALL ||
+            tagIds.isNotEmpty()
 }
 
 data class ReaderScreenState(
@@ -224,7 +284,7 @@ data class ReaderScreenState(
     val initialHighlightsJson: String? = null,
     val initialPageInBook: Int? = null,
     val shelves: List<Shelf> = emptyList(),
-    val viewingShelfName: String? = null,
+    val viewingShelfId: String? = null,
     val isAddingBooksToShelf: Boolean = false,
     val showCreateShelfDialog: Boolean = false,
     val mainScreenStartPage: Int = 0,
@@ -234,7 +294,7 @@ data class ReaderScreenState(
     val addBooksSource: AddBooksSource = AddBooksSource.UNSHELVED,
     val booksSelectedForAdding: Set<String> = emptySet(),
     val booksAvailableForAdding: List<RecentFileItem> = emptyList(),
-    val contextualActionShelfNames: Set<String> = emptySet(),
+    val contextualActionShelfIds: Set<String> = emptySet(),
     val currentUser: UserData? = null,
     val isAuthMenuExpanded: Boolean = false,
     val isProUser: Boolean = false,
@@ -272,7 +332,9 @@ data class ReaderScreenState(
     val appContrastOption: AppContrastOption = AppContrastOption.STANDARD,
     val appTextDimFactor: Float = 1.0f,
     val appSeedColor: androidx.compose.ui.graphics.Color? = null,
-    val customAppThemes: List<CustomAppTheme> = emptyList()
+    val customAppThemes: List<CustomAppTheme> = emptyList(),
+    val allTags: List<TagEntity> = emptyList(),
+    val showTagSelectionDialogFor: Set<String> = emptySet(),
 )
 
 open class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -310,6 +372,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     private val feedbackRepository = FeedbackRepository(appContext)
     private var feedbackListener: Any? = null
     private val importMutex = Mutex()
+    private val epubRecoveryMutex = Mutex()
     private val _navigationEvent = Channel<NavigationEvent>(Channel.BUFFERED)
     @Suppress("unused")
     val navigationEvent = _navigationEvent.receiveAsFlow()
@@ -317,8 +380,12 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     private var externalOpenedBookId: String? = null
 
     private var panelDetector: com.aryan.reader.ml.IPanelDetector? = null
+    private var speechBubbleDetector: ISpeechBubbleDetector? = null
 
     private val mlDispatcher = newSingleThreadExecutor().asCoroutineDispatcher()
+    private val speechBubbleCacheMutex = Mutex()
+    private val speechBubbleCache = ConcurrentHashMap<SpeechBubbleCacheKey, List<CachedSpeechBubble>>()
+    private val speechBubbleDetectionJobs = ConcurrentHashMap<SpeechBubbleCacheKey, Deferred<List<CachedSpeechBubble>>>()
 
     private fun getOrInitDetector(context: Context): com.aryan.reader.ml.IPanelDetector? {
         if (panelDetector == null && BuildConfig.DEBUG) {
@@ -335,6 +402,246 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             }
         }
         return panelDetector
+    }
+
+    private fun getOrInitSpeechBubbleDetector(context: Context): ISpeechBubbleDetector? {
+        if (speechBubbleDetector == null && BuildConfig.FLAVOR != "oss") {
+            val modelFile = File(context.getExternalFilesDir(null), "manga_speech_bubble_v3.ort")
+            if (modelFile.exists()) {
+                try {
+                    val clazz = Class.forName("com.aryan.reader.ml.SpeechBubbleDetector")
+                    speechBubbleDetector = clazz.getConstructor(File::class.java).newInstance(modelFile) as ISpeechBubbleDetector
+                } catch (t: Throwable) {
+                    Timber.e(t, "Failed to instantiate SpeechBubbleDetector via reflection. Deleting corrupted model.")
+                    modelFile.delete()
+                }
+            } else {
+                Timber.e("Model file manga_speech_bubble_v3.ort not found in external files dir")
+            }
+        }
+        return speechBubbleDetector
+    }
+
+    private fun normalizeSpeechBubbles(
+        bubbles: List<SpeechBubble>,
+        width: Int,
+        height: Int
+    ): List<CachedSpeechBubble> {
+        if (width <= 0 || height <= 0) return emptyList()
+        val widthF = width.toFloat()
+        val heightF = height.toFloat()
+        return bubbles.mapNotNull { bubble ->
+            val bounds = bubble.bounds
+            if (bounds.width() <= 0f || bounds.height() <= 0f) {
+                null
+            } else {
+                CachedSpeechBubble(
+                    leftFraction = (bounds.left / widthF).coerceIn(0f, 1f),
+                    topFraction = (bounds.top / heightF).coerceIn(0f, 1f),
+                    rightFraction = (bounds.right / widthF).coerceIn(0f, 1f),
+                    bottomFraction = (bounds.bottom / heightF).coerceIn(0f, 1f),
+                    maskBitmap = bubble.maskBitmap
+                )
+            }
+        }
+    }
+
+    private fun scaleCachedSpeechBubbles(
+        bubbles: List<CachedSpeechBubble>,
+        width: Int,
+        height: Int
+    ): List<SpeechBubble> {
+        if (width <= 0 || height <= 0) return emptyList()
+        val widthF = width.toFloat()
+        val heightF = height.toFloat()
+        return bubbles.mapNotNull { bubble ->
+            val bounds = android.graphics.RectF(
+                bubble.leftFraction * widthF,
+                bubble.topFraction * heightF,
+                bubble.rightFraction * widthF,
+                bubble.bottomFraction * heightF
+            )
+            if (bounds.width() <= 0f || bounds.height() <= 0f) {
+                null
+            } else {
+                SpeechBubble(bounds = bounds, maskBitmap = bubble.maskBitmap)
+            }
+        }
+    }
+
+    fun hasCachedSpeechBubbles(documentId: String, pageIndex: Int): Boolean {
+        return speechBubbleCache.containsKey(SpeechBubbleCacheKey(documentId, pageIndex))
+    }
+
+    fun testSpeechBubbleDetection(context: Context) {
+        viewModelScope.launch(mlDispatcher) {
+            try { // <--- We now wrap the WHOLE thing in a Throwable catch
+                val modelFile = File(context.getExternalFilesDir(null), "manga_speech_bubble_v3.ort")
+                if (!modelFile.exists()) {
+                    withContext(Dispatchers.Main) { showBanner("ONNX Model not found", isError = true) }
+                    return@launch
+                }
+
+                val cbzItem = uiState.value.contextualActionItems.firstOrNull { it.type == FileType.CBZ }
+                    ?: uiState.value.allRecentFiles.firstOrNull { it.type == FileType.CBZ }
+
+                if (cbzItem == null) {
+                    withContext(Dispatchers.Main) { showBanner("No CBZ found in Library.", isError = true) }
+                    return@launch
+                }
+
+                val uri = cbzItem.getUri() ?: return@launch
+                Timber.d("BUBBLE TEST START: ${cbzItem.displayName}")
+
+                var cacheFile: File? = null
+                try {
+                    Timber.d("Initializing Speech Bubble Detector...")
+                    val detector = getOrInitSpeechBubbleDetector(context) ?: run {
+                        withContext(Dispatchers.Main) { showBanner("ONNX Model could not be loaded", isError = true) }
+                        return@launch
+                    }
+                    Timber.d("Detector successfully initialized. Copying CBZ to cache...")
+
+                    cacheFile = File(context.cacheDir, "temp_test_bubble.cbz")
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        cacheFile.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    Timber.d("CBZ copied to cache successfully. Opening archive...")
+
+                    val archiveDoc = com.aryan.reader.pdf.ArchiveDocumentWrapper(cacheFile)
+                    val totalPages = archiveDoc.getPageCount()
+                    Timber.d("Archive opened. Total pages: $totalPages")
+
+                    val targetIndex = 2
+                    if (targetIndex < totalPages) {
+                        Timber.d("Reading page $targetIndex...")
+                        val page = archiveDoc.openPage(targetIndex)
+                        if (page != null) {
+                            val w = page.getPageWidthPoint()
+                            val h = page.getPageHeightPoint()
+                            if (w > 0 && h > 0) {
+                                Timber.d("Rendering bitmap: $w x $h...")
+                                val bitmap = androidx.core.graphics.createBitmap(w, h)
+                                page.renderPageBitmap(bitmap, 0, 0, w, h, false)
+
+                                Timber.d("Running ONNX Inference...")
+                                val pageStartTime = System.currentTimeMillis()
+                                val bubbles = detector.detectBubbles(bitmap, confidenceThreshold = 0.4f)
+                                val pageDuration = System.currentTimeMillis() - pageStartTime
+
+                                val logLine = "Page $targetIndex: ${pageDuration}ms (Found ${bubbles.size} bubbles)"
+                                Timber.d(">>> [BUBBLE] $logLine")
+
+                                withContext(Dispatchers.Main) {
+                                    showBanner("Bubble Test Complete! $logLine")
+                                }
+                                bitmap.recycle()
+                            }
+                            page.close()
+                        }
+                    } else {
+                        Timber.e("Page $targetIndex out of bounds")
+                        withContext(Dispatchers.Main) {
+                            showBanner("CBZ does not have a 3rd page.", isError = true)
+                        }
+                    }
+                    archiveDoc.close()
+                    Timber.d("Archive closed cleanly.")
+                } finally {
+                    cacheFile?.delete()
+                }
+            } catch (t: Throwable) {
+                Timber.e(t, "Fatal error during bubble test")
+            }
+        }
+    }
+
+    val speechBubbleModelDownloadProgress = MutableStateFlow<Float?>(null)
+
+    fun isSpeechBubbleModelAvailable(context: Context): Boolean {
+        return File(context.getExternalFilesDir(null), "manga_speech_bubble_v3.ort").exists()
+    }
+
+    fun downloadSpeechBubbleModel(context: Context) {
+        if (speechBubbleModelDownloadProgress.value != null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            speechBubbleModelDownloadProgress.value = 0f
+            var success = false
+            val modelFile = File(context.getExternalFilesDir(null), "manga_speech_bubble_v3.ort")
+            val tempFile = File(context.getExternalFilesDir(null), "manga_speech_bubble_v3.ort.tmp")
+            val urlString = "https://huggingface.co/1m4ryan/speech-bubble-detector/resolve/main/manga_speech_bubble_v3.ort"
+
+            var downloadedBytes = if (tempFile.exists()) tempFile.length() else 0L
+            val maxRetries = 3
+            var retryCount = 0
+
+            while (retryCount < maxRetries && !success) {
+                try {
+                    val url = java.net.URL(urlString)
+                    val connection = url.openConnection() as java.net.HttpURLConnection
+
+                    if (downloadedBytes > 0) {
+                        connection.setRequestProperty("Range", "bytes=$downloadedBytes-")
+                    }
+
+                    connection.connectTimeout = 15000
+                    connection.readTimeout = 15000
+                    connection.connect()
+
+                    val responseCode = connection.responseCode
+                    val isPartial = responseCode == java.net.HttpURLConnection.HTTP_PARTIAL
+
+                    if (responseCode == java.net.HttpURLConnection.HTTP_OK && downloadedBytes > 0) {
+                        downloadedBytes = 0L
+                    } else if (responseCode != java.net.HttpURLConnection.HTTP_OK && !isPartial) {
+                        throw Exception("HTTP error code: $responseCode")
+                    }
+
+                    val contentLength = connection.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
+                    val totalFileLength = if (contentLength != -1L) downloadedBytes + contentLength else -1L
+
+                    val input = connection.inputStream
+                    val output = java.io.FileOutputStream(tempFile, isPartial)
+                    val data = ByteArray(16 * 1024)
+                    var count: Int
+
+                    while (input.read(data).also { count = it } != -1) {
+                        output.write(data, 0, count)
+                        downloadedBytes += count
+                        if (totalFileLength > 0) {
+                            speechBubbleModelDownloadProgress.value = (downloadedBytes.toFloat() / totalFileLength).coerceIn(0f, 1f)
+                        }
+                    }
+                    output.flush()
+                    output.close()
+                    input.close()
+
+                    if (tempFile.exists() && tempFile.length() > 0) {
+                        if (modelFile.exists()) modelFile.delete()
+                        if (tempFile.renameTo(modelFile)) {
+                            success = true
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to download Bubble Zoom model, attempt ${retryCount + 1}")
+                    retryCount++
+                    if (retryCount >= maxRetries) break
+                    delay(2000)
+                    downloadedBytes = if (tempFile.exists()) tempFile.length() else 0L
+                }
+            }
+
+            speechBubbleModelDownloadProgress.value = null
+            withContext(Dispatchers.Main) {
+                if (success) {
+                    showBanner("Bubble Zoom model downloaded successfully!")
+                } else {
+                    showBanner("Download failed. Please keep the app open during download.", isError = true)
+                }
+            }
+        }
     }
 
     data class PageModificationResult(
@@ -377,6 +684,13 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (_: IllegalArgumentException) {
                 AddBooksSource.UNSHELVED
             },
+            mainScreenStartPage = prefs.getInt(KEY_MAIN_SCREEN_START_PAGE, 0).coerceIn(0, 1),
+            libraryScreenStartPage = prefs.getInt(
+                KEY_LIBRARY_SCREEN_START_PAGE,
+                0
+            ).coerceIn(0, if (BuildConfig.IS_OFFLINE) 2 else 3),
+            viewingShelfId = prefs.getString(KEY_LAST_VIEWING_SHELF_ID, null),
+            isAddingBooksToShelf = prefs.getBoolean(KEY_LAST_ADDING_BOOKS_TO_SHELF, false),
             currentUser = authRepository.getSignedInUser(),
             isSyncEnabled = prefs.getBoolean(KEY_SYNC_ENABLED, false),
             isFolderSyncEnabled = prefs.getBoolean(KEY_FOLDER_SYNC_ENABLED, false),
@@ -387,7 +701,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 sourceFolders = prefs.getStringSet(KEY_FILTER_FOLDERS, emptySet()) ?: emptySet(),
                 readStatus = runCatching {
                     ReadStatusFilter.valueOf(prefs.getString(KEY_FILTER_READ_STATUS, ReadStatusFilter.ALL.name) ?: ReadStatusFilter.ALL.name)
-                }.getOrDefault(ReadStatusFilter.ALL)
+                }.getOrDefault(ReadStatusFilter.ALL),
+                tagIds = prefs.getStringSet(KEY_FILTER_TAG_IDS, emptySet()) ?: emptySet()
             ),
             syncedFolders = loadSyncedFoldersFromPrefs(),
             lastFolderScanTime = if (prefs.contains(KEY_LAST_FOLDER_SCAN_TIME)) prefs.getLong(
@@ -419,24 +734,89 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         )
     )
 
+    private suspend fun prepareBookForImport(externalUri: Uri): ImportResult? {
+        val displayName = getFileNameFromUri(externalUri, appContext)
+        var type = getFileTypeFromUri(externalUri, appContext)
+
+        val hash = FileHasher.calculateSha256 {
+            appContext.contentResolver.openInputStream(externalUri)
+        }
+        if (hash == null) {
+            Timber.e("Failed to process file hash for $externalUri")
+            return null
+        }
+
+        val existingItem = recentFilesRepository.getFileByBookId(hash)
+        if (existingItem != null) {
+            Timber.i("Book with ID: $hash already exists. Skipping import.")
+            return null
+        }
+
+        val fileName = displayName ?: ""
+        if (fileName.endsWith(".zip", ignoreCase = true) || type == FileType.CBZ) {
+            val bundleResult = CalibreBundleExtractor.processZip(appContext, externalUri, hash, bookImporter, recentFilesRepository)
+
+            Timber.d("MainViewModel: Calibre processZip returned: $bundleResult")
+
+            if (bundleResult != null) {
+                return ImportResult(
+                    internalUri = bundleResult.internalBookUri,
+                    bookId = hash,
+                    type = bundleResult.type,
+                    bundleResult = bundleResult
+                )
+            }
+            if (type == null) type = FileType.CBZ
+        }
+
+        if (type == null) return null
+
+        Timber.i("Importing new book with ID: $hash")
+        val internalFile = bookImporter.importBook(externalUri) ?: return null
+        return ImportResult(internalFile.toUri(), hash, type, null)
+    }
+
+    val libraryFlow = combine(
+        recentFilesRepository.getRecentFilesFlow(),
+        recentFilesRepository.activeShelvesFlow,
+        recentFilesRepository.shelfCrossRefsFlow,
+        ::Triple
+    )
+
+    val tagFlow = combine(
+        recentFilesRepository.tagsFlow,
+        recentFilesRepository.tagCrossRefsFlow,
+        ::Pair
+    )
+
     open val uiState: StateFlow<ReaderScreenState> = combine(
-        _internalState, recentFilesRepository.getRecentFilesFlow(), _prefsUpdateFlow
-    ) { internalState, recentFilesFromDb, _ ->
+        _internalState, libraryFlow, tagFlow
+    ) { internalState, (recentFilesFromDb, dbShelves, shelfRefs), (dbTags, tagRefs) ->
+        val tagsById = dbTags.associateBy { it.id }
+        val bookTagsMap = tagRefs.groupBy { it.bookId }.mapValues { entry ->
+            entry.value.mapNotNull { tagsById[it.tagId] }
+        }
+
+        val allLibraryFiles = recentFilesFromDb
+            .filterNot { it.bookId.endsWith("_reflow") }
+            .map { item ->
+            item.copy(tags = bookTagsMap[item.bookId] ?: emptyList())
+        }
+
         val query = internalState.searchQuery.trim()
         val rawFilteredByQuery = if (query.isBlank()) {
-            recentFilesFromDb
+            allLibraryFiles
         } else {
-            recentFilesFromDb.filter { item ->
+            allLibraryFiles.filter { item ->
                 item.displayName.contains(query, ignoreCase = true) ||
-                        item.title?.contains(query, ignoreCase = true) == true ||
-                        item.author?.contains(query, ignoreCase = true) == true
+                    item.title?.contains(query, ignoreCase = true) == true ||
+                    item.author?.contains(query, ignoreCase = true) == true ||
+                    item.tags.any { tag -> tag.name.contains(query, ignoreCase = true) }
             }
         }
 
-        val baseVisibleFiles = rawFilteredByQuery.filterNot { it.bookId.endsWith("_reflow") }
-
         val filters = internalState.libraryFilters
-        val libraryFiltered = baseVisibleFiles.filter { item ->
+        val libraryFiltered = rawFilteredByQuery.filter { item ->
             val matchType = if (filters.fileTypes.isNotEmpty()) item.type in filters.fileTypes else true
             val matchFolder = if (filters.sourceFolders.isNotEmpty()) {
                 val matchesInApp = filters.sourceFolders.contains("IN_APP_STORAGE") && item.sourceFolderUri == null && item.uriString?.startsWith("opds-pse") != true
@@ -450,7 +830,10 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 ReadStatusFilter.IN_PROGRESS -> progress > 0f && progress < 100f
                 ReadStatusFilter.COMPLETED -> progress >= 100f
             }
-            matchType && matchFolder && matchStatus
+            val matchTags = if (filters.tagIds.isNotEmpty()) {
+                item.tags.any { it.id in filters.tagIds }
+            } else true
+            matchType && matchFolder && matchStatus && matchTags
         }
 
         fun sortFiles(files: List<RecentFileItem>): List<RecentFileItem> {
@@ -465,71 +848,242 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             }
         }
 
-        val sortedLibraryFiles = sortFiles(libraryFiltered).let { list ->
-            val pinned = list.filter { it.bookId in internalState.pinnedLibraryBookIds }
-            val unpinned = list.filter { it.bookId !in internalState.pinnedLibraryBookIds }
-            pinned + unpinned
-        }
-
-        val visibleRecentFiles = sortFiles(baseVisibleFiles.filter { it.isRecent }).let { list ->
-            val pinned = list.filter { it.bookId in internalState.pinnedHomeBookIds }
-            val unpinned = list.filter { it.bookId !in internalState.pinnedHomeBookIds }
-            val combined = pinned + unpinned
-            if (internalState.recentFilesLimit > 0) combined.take(internalState.recentFilesLimit) else combined
-        }
-
-        val allBaseFiles = recentFilesFromDb.filterNot { it.bookId.endsWith("_reflow") }
-        val openTabsList = internalState.openTabIds.mapNotNull { tabId ->
-            allBaseFiles.find { it.bookId == tabId }
-        }
-
-        val validContextualItems = internalState.contextualActionItems.filter { contextItem ->
-            baseVisibleFiles.any { dbItem -> dbItem.uriString == contextItem.uriString }
-        }.toSet()
-
-        val shelfNames = prefs.getStringSet(KEY_SHELVES, emptySet()) ?: emptySet()
+        val sortedLibraryFiles = sortFiles(libraryFiltered)
+        val visibleRecentFiles = sortFiles(allLibraryFiles.filter { it.isRecent }).take(
+            if (internalState.recentFilesLimit > 0) internalState.recentFilesLimit else Int.MAX_VALUE
+        )
+        val openTabsList = internalState.openTabIds.mapNotNull { tabId -> allLibraryFiles.find { it.bookId == tabId } }
+        val allShelves = mutableListOf<Shelf>()
         val shelvedBookIds = mutableSetOf<String>()
+        val baseFilesMap = allLibraryFiles.associateBy { it.bookId }
 
-        val shelvesFromPrefs = shelfNames.map { shelfName ->
-            val bookIds = prefs.getStringSet("$KEY_SHELF_CONTENT_PREFIX$shelfName", emptySet()) ?: emptySet()
-            val booksForShelf = baseVisibleFiles.filter { it.bookId in bookIds }
-            shelvedBookIds.addAll(booksForShelf.map { it.bookId })
-            Shelf(shelfName, booksForShelf)
-        }.sortedBy { it.name }
-
-        val unshelvedBooks = baseVisibleFiles.filter { it.bookId !in shelvedBookIds }
-        val allShelves = shelvesFromPrefs + Shelf("Unshelved", unshelvedBooks)
-
-        val booksAvailableForAdding =
-            if (internalState.isAddingBooksToShelf && internalState.viewingShelfName != null) {
-                val currentShelfBooksUris = allShelves.find {
-                    it.name == internalState.viewingShelfName
-                }?.books?.map { it.uriString }?.toSet() ?: emptySet()
-
-                when (internalState.addBooksSource) {
-                    AddBooksSource.UNSHELVED -> unshelvedBooks
-                    AddBooksSource.ALL_BOOKS -> baseVisibleFiles.filter {
-                        it.uriString !in currentShelfBooksUris
-                    }
+        dbShelves.forEach { shelfEntity ->
+            if (shelfEntity.isSmart && shelfEntity.smartRulesJson != null) {
+                val rules = SmartCollectionEngine.fromJson(shelfEntity.smartRulesJson)
+                if (rules != null) {
+                    val matchingBooks = allLibraryFiles.filter { SmartCollectionEngine.evaluate(it, rules) }
+                    allShelves.add(Shelf(shelfEntity.id, shelfEntity.name, ShelfType.SMART, sortFiles(matchingBooks)))
+                    shelvedBookIds.addAll(matchingBooks.map { it.bookId })
                 }
             } else {
-                emptyList()
+                val bookIdsInShelf = shelfRefs.filter { it.shelfId == shelfEntity.id }.sortedBy { it.addedAt }.map { it.bookId }
+                val booksInShelf = bookIdsInShelf.mapNotNull { baseFilesMap[it] }
+                allShelves.add(Shelf(shelfEntity.id, shelfEntity.name, ShelfType.MANUAL, sortFiles(booksInShelf)))
+                shelvedBookIds.addAll(bookIdsInShelf)
             }
+        }
+
+        val tagShelves = dbTags.mapNotNull { tag ->
+            val taggedBooks = allLibraryFiles.filter { item -> item.tags.any { it.id == tag.id } }
+            if (taggedBooks.isEmpty()) {
+                null
+            } else {
+                Shelf("tag_${tag.id}", tag.name, ShelfType.TAG, sortFiles(taggedBooks))
+            }
+        }
+        allShelves.addAll(tagShelves)
+
+        val seriesShelves = allLibraryFiles
+            .filter { !it.seriesName.isNullOrBlank() }
+            .groupBy { it.seriesName!! }
+            .filter { it.value.size >= 2 }
+            .map { (series, books) ->
+                val sortedSeries = books.sortedBy { it.seriesIndex ?: 999.0 }
+                shelvedBookIds.addAll(books.map { it.bookId })
+                Shelf("series_$series", series, ShelfType.SERIES, sortedSeries)
+            }
+        allShelves.addAll(seriesShelves)
+
+        val folderShelves = buildFolderShelves(
+            allLibraryFiles = allLibraryFiles,
+            syncedFolders = internalState.syncedFolders,
+            sortFiles = ::sortFiles
+        ).also { shelves ->
+            shelves.forEach { shelf ->
+                shelvedBookIds.addAll(shelf.books.map { it.bookId })
+            }
+        }
+        allShelves.addAll(folderShelves)
+
+        val unshelvedBooks = allLibraryFiles.filter { it.bookId !in shelvedBookIds }
+        allShelves.add(Shelf("unshelved", "Unshelved", ShelfType.MANUAL, sortFiles(unshelvedBooks)))
+
+        allShelves.sortWith(compareBy({ it.type.ordinal }, { it.sortKey }))
+
+        val validShelfIds = allShelves.mapTo(mutableSetOf()) { it.id }
+        val viewingShelfId = internalState.viewingShelfId?.takeIf { it in validShelfIds }
+        val selectedShelfIds = internalState.contextualActionShelfIds.filterTo(mutableSetOf()) { it in validShelfIds }
+
+        val booksAvailableForAdding = if (internalState.isAddingBooksToShelf && viewingShelfId != null) {
+            val currentShelfBookIds = allShelves
+                .find { it.id == viewingShelfId }
+                ?.books
+                ?.map { it.bookId }
+                ?.toSet()
+                ?: emptySet()
+            when (internalState.addBooksSource) {
+                AddBooksSource.UNSHELVED -> unshelvedBooks
+                AddBooksSource.ALL_BOOKS -> allLibraryFiles.filter { it.bookId !in currentShelfBookIds }
+            }
+        } else emptyList()
 
         internalState.copy(
             recentFiles = visibleRecentFiles,
             allRecentFiles = sortedLibraryFiles,
-            rawLibraryFiles = baseVisibleFiles,
-            contextualActionItems = validContextualItems,
+            rawLibraryFiles = allLibraryFiles,
+            viewingShelfId = viewingShelfId,
+            isAddingBooksToShelf = internalState.isAddingBooksToShelf && viewingShelfId != null,
+            contextualActionShelfIds = selectedShelfIds,
+            contextualActionItems = internalState.contextualActionItems.mapNotNull { ctx -> allLibraryFiles.find { it.bookId == ctx.bookId } }.toSet(),
             shelves = allShelves,
             openTabs = openTabsList,
-            booksAvailableForAdding = booksAvailableForAdding
+            booksAvailableForAdding = booksAvailableForAdding,
+            allTags = dbTags
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = _internalState.value
     )
+
+    private data class FolderShelfAccumulator(
+        val id: String,
+        val name: String,
+        val depth: Int,
+        val parentShelfId: String?,
+        val sortPath: String,
+        val books: MutableList<RecentFileItem> = mutableListOf(),
+        val directBooks: MutableList<RecentFileItem> = mutableListOf(),
+        val childShelfIds: MutableList<String> = mutableListOf()
+    )
+
+    private fun buildFolderShelves(
+        allLibraryFiles: List<RecentFileItem>,
+        syncedFolders: List<SyncedFolder>,
+        sortFiles: (List<RecentFileItem>) -> List<RecentFileItem>
+    ): List<Shelf> {
+        val folderNamesByUri = syncedFolders.associate { it.uriString to it.name }
+
+        return allLibraryFiles
+            .filter { it.sourceFolderUri != null }
+            .groupBy { it.sourceFolderUri!! }
+            .flatMap { (folderUri, books) ->
+                val rootName = folderNamesByUri[folderUri] ?: "Local Folder"
+                val rootShelfId = "folder_$folderUri"
+                val rootAccumulator = FolderShelfAccumulator(
+                    id = rootShelfId,
+                    name = rootName,
+                    depth = 0,
+                    parentShelfId = null,
+                    sortPath = ""
+                )
+                val rootShelf = Shelf(
+                    id = rootShelfId,
+                    name = rootName,
+                    type = ShelfType.FOLDER,
+                    books = sortFiles(books),
+                    directBooks = mutableListOf<RecentFileItem>().also { direct ->
+                        direct.addAll(books.filter { getRelativeFolderSegments(it).isEmpty() })
+                    },
+                    childShelfIds = emptyList(),
+                    depth = 0,
+                    sortKey = "folder:${rootName.lowercase()}:"
+                )
+
+                val nestedShelves = linkedMapOf<String, FolderShelfAccumulator>()
+                books.forEach { book ->
+                    rootAccumulator.books.add(book)
+                    val segments = getRelativeFolderSegments(book)
+                    if (segments.isEmpty()) {
+                        rootAccumulator.directBooks.add(book)
+                    }
+                    var currentPath = ""
+                    var parentShelfId = rootShelfId
+                    segments.forEachIndexed { index, segment ->
+                        currentPath = if (currentPath.isEmpty()) segment else "$currentPath/$segment"
+                        val shelfId = "folder_$folderUri::$currentPath"
+                        val accumulator = nestedShelves.getOrPut(currentPath) {
+                            val newShelf = FolderShelfAccumulator(
+                                id = shelfId,
+                                name = segment,
+                                depth = index + 1,
+                                parentShelfId = parentShelfId,
+                                sortPath = currentPath.lowercase()
+                            )
+                            if (parentShelfId == rootShelfId) {
+                                rootAccumulator.childShelfIds.add(shelfId)
+                            } else {
+                                nestedShelves.values.find { it.id == parentShelfId }?.childShelfIds?.add(shelfId)
+                            }
+                            newShelf
+                        }
+                        accumulator.books.add(book)
+                        if (index == segments.lastIndex) {
+                            accumulator.directBooks.add(book)
+                        }
+                        parentShelfId = shelfId
+                    }
+                }
+
+                val sortedNestedShelves = nestedShelves
+                    .values
+                    .sortedBy { it.sortPath }
+                    .map { shelf ->
+                        Shelf(
+                            id = shelf.id,
+                            name = shelf.name,
+                            type = ShelfType.FOLDER,
+                            books = sortFiles(shelf.books),
+                            directBooks = sortFiles(shelf.directBooks),
+                            parentShelfId = shelf.parentShelfId,
+                            childShelfIds = shelf.childShelfIds.sortedBy { it.substringAfterLast("::").lowercase() },
+                            depth = shelf.depth,
+                            sortKey = "folder:${rootName.lowercase()}:${shelf.sortPath}"
+                        )
+                    }
+
+                listOf(
+                    rootShelf.copy(
+                        directBooks = sortFiles(rootAccumulator.directBooks),
+                        childShelfIds = rootAccumulator.childShelfIds.sortedBy { it.substringAfterLast("::").lowercase() }
+                    )
+                ) + sortedNestedShelves
+            }
+    }
+
+    private fun getRelativeFolderSegments(item: RecentFileItem): List<String> {
+        val documentUriString = item.uriString ?: return emptyList()
+        val rootFolderUriString = item.sourceFolderUri ?: return emptyList()
+
+        return try {
+            val documentUri = documentUriString.toUri()
+            val rootFolderUri = rootFolderUriString.toUri()
+            val rootDocId = DocumentsContract.getTreeDocumentId(rootFolderUri)
+            val documentId = when {
+                DocumentsContract.isDocumentUri(appContext, documentUri) -> DocumentsContract.getDocumentId(documentUri)
+                DocumentsContract.isTreeUri(documentUri) -> DocumentsContract.getTreeDocumentId(documentUri)
+                else -> return emptyList()
+            }
+
+            val rootPath = rootDocId.substringAfter(':', "")
+            val documentPath = documentId.substringAfter(':', "")
+            val relativeDocumentPath = when {
+                rootPath.isBlank() -> documentPath
+                documentPath == rootPath -> ""
+                documentPath.startsWith("$rootPath/") -> documentPath.removePrefix("$rootPath/")
+                else -> documentPath
+            }
+
+            relativeDocumentPath
+                .substringBeforeLast('/', "")
+                .split('/')
+                .map { Uri.decode(it).trim() }
+                .filter { it.isNotEmpty() }
+        } catch (e: Exception) {
+            Timber.tag("FolderShelves").w(e, "Failed to derive relative folder path for ${item.displayName}")
+            emptyList()
+        }
+    }
 
     fun setTabsEnabled(enabled: Boolean) {
         prefs.edit { putBoolean(KEY_TABS_ENABLED, enabled) }
@@ -569,6 +1123,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         Timber.tag("PdfTabSync").d("ViewModel: ActiveTab updated to $bookId. URI found: ${uri != null}")
 
         uri?.let {
+            persistReaderSession(bookId, item.type)
             Timber.tag("PdfTabSync").d("ViewModel: Setting new URI directly: $it")
             _internalState.update { state ->
                 state.copy(
@@ -596,6 +1151,140 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             }
         } ?: run {
             _internalState.update { it.copy(openTabIds = currentTabs, activeTabBookId = bookId) }
+        }
+    }
+
+    fun openTagSelection(bookIds: Set<String>) {
+        if (bookIds.isEmpty()) return
+        _internalState.update { it.copy(showTagSelectionDialogFor = bookIds) }
+    }
+
+    fun closeTagSelection() {
+        _internalState.update { it.copy(showTagSelectionDialogFor = emptySet()) }
+    }
+
+    fun createAndAssignTag(name: String, bookIds: Set<String>) {
+        val trimmedName = name.trim()
+        if (trimmedName.isBlank() || bookIds.isEmpty()) return
+
+        viewModelScope.launch {
+            val tagId = UUID.randomUUID().toString()
+            val colors = listOf(0xFFE57373, 0xFFF06292, 0xFFBA68C8, 0xFF9575CD, 0xFF7986CB, 0xFF64B5F6, 0xFF4FC3F7, 0xFF4DD0E1, 0xFF4DB6AC, 0xFF81C784, 0xFFAED581, 0xFFFF8A65, 0xFFA1887F, 0xFF90A4AE)
+            val color = colors.random().toInt()
+
+            val tag = TagEntity(tagId, trimmedName, color, System.currentTimeMillis())
+            recentFilesRepository.createTag(tag)
+
+            bookIds.forEach { bookId ->
+                recentFilesRepository.assignTagToBook(bookId, tagId)
+            }
+        }
+    }
+
+    fun toggleTagForBooks(tagId: String, bookIds: Set<String>, assign: Boolean) {
+        if (tagId.isBlank() || bookIds.isEmpty()) return
+        viewModelScope.launch {
+            bookIds.forEach { bookId ->
+                if (assign) {
+                    recentFilesRepository.assignTagToBook(bookId, tagId)
+                } else {
+                    recentFilesRepository.removeTagFromBook(bookId, tagId)
+                }
+            }
+        }
+    }
+
+    private fun buildDefaultTags(): List<TagEntity> {
+        val now = System.currentTimeMillis()
+        return listOf(
+            TagEntity(id = "default_to_read", name = "To Read", color = 0xFF64B5F6.toInt(), createdAt = now),
+            TagEntity(id = "default_reading", name = "Reading", color = 0xFF81C784.toInt(), createdAt = now + 1),
+            TagEntity(id = "default_finished", name = "Finished", color = 0xFFFFB74D.toInt(), createdAt = now + 2),
+            TagEntity(id = "default_favorites", name = "Favorites", color = 0xFFF06292.toInt(), createdAt = now + 3),
+            TagEntity(id = "default_reference", name = "Reference", color = 0xFF9575CD.toInt(), createdAt = now + 4)
+        )
+    }
+
+    private var googleFontsCache: List<String> = emptyList()
+
+    fun loadGoogleFontsList(context: Context): List<String> {
+        if (googleFontsCache.isEmpty()) {
+            try {
+                val jsonString = context.assets.open("google_fonts.json").bufferedReader().use { it.readText() }
+                val jsonArray = org.json.JSONArray(jsonString)
+                val list = mutableListOf<String>()
+                for (i in 0 until jsonArray.length()) {
+                    list.add(jsonArray.getString(i))
+                }
+                googleFontsCache = list
+                Timber.d("Loaded ${list.size} Google Fonts from assets.")
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to load google_fonts.json from assets")
+            }
+        }
+        return googleFontsCache
+    }
+
+    fun downloadGoogleFont(fontName: String, onComplete: () -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val encodedName = java.net.URLEncoder.encode(fontName, "UTF-8")
+                val url = java.net.URL("https://fonts.googleapis.com/css?family=$encodedName")
+                val connection = url.openConnection() as java.net.HttpURLConnection
+
+                // CRITICAL: We spoof an old Safari User-Agent. This forces Google to return the raw .ttf file instead of .woff2
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10_6_8; en-us) AppleWebKit/533.21.1 (KHTML, like Gecko) Version/5.0.5 Safari/533.21.1")
+
+                if (connection.responseCode != 200) {
+                    withContext(Dispatchers.Main) { showBanner("Font '$fontName' not found on server.", isError = true) }
+                    return@launch
+                }
+
+                val css = connection.inputStream.bufferedReader().readText()
+
+                val regex = """url\((https://[^)]+)\)""".toRegex()
+                val match = regex.find(css)
+
+                if (match != null) {
+                    val fontUrl = match.groupValues[1]
+                    val ext = fontUrl.substringAfterLast(".", "ttf").lowercase()
+
+                    // Strict format validation
+                    if (ext != "ttf" && ext != "otf") {
+                        withContext(Dispatchers.Main) { showBanner("Unsupported format ($ext) returned for $fontName", isError = true) }
+                        return@launch
+                    }
+
+                    val fontConnection = java.net.URL(fontUrl).openConnection() as java.net.HttpURLConnection
+                    val tempFile = File(appContext.cacheDir, "$fontName.$ext")
+
+                    fontConnection.inputStream.use { input ->
+                        tempFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+
+                    val result = fontsRepository.importFont(android.net.Uri.fromFile(tempFile))
+                    result.onSuccess { font ->
+                        if (uiState.value.isSyncEnabled) {
+                            uploadNewFont(font)
+                        }
+                        withContext(Dispatchers.Main) { showBanner("$fontName downloaded successfully!") }
+                    }.onFailure {
+                        withContext(Dispatchers.Main) {
+                            showBanner(appContext.getString(R.string.error_import_font, it.message), isError = true)
+                        }
+                    }
+                    tempFile.delete()
+                } else {
+                    withContext(Dispatchers.Main) { showBanner("Could not parse download link for $fontName", isError = true) }
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to download Google Font: $fontName")
+                withContext(Dispatchers.Main) { showBanner("Failed to download $fontName: ${e.localizedMessage}", isError = true) }
+            } finally {
+                withContext(Dispatchers.Main) { onComplete() }
+            }
         }
     }
 
@@ -822,6 +1511,14 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
     init {
         Timber.d("ViewModel instance created.")
+        WorkManager.getInstance(application).cancelUniqueWork(FolderSyncWorker.WORK_NAME)
+        viewModelScope.launch {
+            recentFilesRepository.migrateLegacyShelvesToRoom()
+            if (!prefs.getBoolean(KEY_DEFAULT_TAGS_SEEDED, false)) {
+                recentFilesRepository.seedTagsIfEmpty(buildDefaultTags())
+                prefs.edit { putBoolean(KEY_DEFAULT_TAGS_SEEDED, true) }
+            }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             PDFBoxResourceLoader.init(getApplication())
         }
@@ -843,6 +1540,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         sweepOrphanedCache()
+        restoreReaderSessionIfNeeded()
 
         viewModelScope.launch { billingClientWrapper.initializeConnection() }
 
@@ -905,6 +1603,258 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         triggerLegacyPurchaseMigration()
                     }
                 }
+        }
+    }
+
+    private fun persistReaderSession(bookId: String, type: FileType) {
+        prefs.edit {
+            putString(KEY_LAST_OPEN_BOOK_ID, bookId)
+            putString(KEY_LAST_OPEN_FILE_TYPE, type.name)
+        }
+    }
+
+    private fun clearPersistedReaderSession() {
+        prefs.edit {
+            remove(KEY_LAST_OPEN_BOOK_ID)
+            remove(KEY_LAST_OPEN_FILE_TYPE)
+        }
+    }
+
+    private fun restoreReaderSessionIfNeeded() {
+        val currentState = _internalState.value
+        if (currentState.selectedBookId != null || currentState.selectedPdfUri != null || currentState.selectedEpubUri != null) {
+            return
+        }
+
+        val persistedType = prefs.getString(KEY_LAST_OPEN_FILE_TYPE, null)?.let { typeName ->
+            runCatching { FileType.valueOf(typeName) }.getOrNull()
+        }
+        val restoreBookId = prefs.getString(KEY_LAST_OPEN_BOOK_ID, null) ?: return
+        if (persistedType == null) {
+            clearPersistedReaderSession()
+            return
+        }
+
+        viewModelScope.launch {
+            val item = recentFilesRepository.getFileByBookId(restoreBookId)
+            val restoreUri = item?.getUri()
+            if (item == null || restoreUri == null || item.type != persistedType) {
+                Timber.tag("ReaderRestore")
+                    .w("Skipping restore for bookId=$restoreBookId. Item missing, URI missing, or type mismatch.")
+                clearPersistedReaderSession()
+                return@launch
+            }
+
+            when {
+                item.type in PDF_VIEWER_FILE_TYPES -> {
+                    _internalState.update { state ->
+                        if (state.selectedBookId != null || state.selectedPdfUri != null || state.selectedEpubUri != null) {
+                            state
+                        } else {
+                            state.copy(
+                                selectedPdfUri = restoreUri,
+                                selectedBookId = item.bookId,
+                                selectedEpubBook = null,
+                                selectedEpubUri = null,
+                                selectedFileType = item.type,
+                                isLoading = false,
+                                errorMessage = null,
+                                initialLocator = null,
+                                initialCfi = null,
+                                initialBookmarksJson = item.bookmarksJson,
+                                initialHighlightsJson = null,
+                                initialPageInBook = item.lastPage
+                            )
+                        }
+                    }
+                    persistReaderSession(item.bookId, item.type)
+                    Timber.tag("ReaderRestore").i("Restored reader session for ${item.bookId} (${item.type}).")
+                }
+                item.type in EPUB_READER_FILE_TYPES -> {
+                    val locator =
+                        if (item.lastChapterIndex != null && item.locatorBlockIndex != null && item.locatorCharOffset != null) {
+                            Locator(
+                                chapterIndex = item.lastChapterIndex,
+                                blockIndex = item.locatorBlockIndex,
+                                charOffset = item.locatorCharOffset
+                            )
+                        } else {
+                            null
+                        }
+
+                    _internalState.update { state ->
+                        if (state.selectedBookId != null || state.selectedPdfUri != null || state.selectedEpubUri != null) {
+                            state
+                        } else {
+                            state.copy(
+                                selectedPdfUri = null,
+                                selectedBookId = item.bookId,
+                                selectedEpubBook = null,
+                                selectedEpubUri = restoreUri,
+                                selectedFileType = item.type,
+                                isLoading = true,
+                                errorMessage = null,
+                                initialLocator = locator,
+                                initialCfi = item.lastPositionCfi,
+                                initialBookmarksJson = item.bookmarksJson,
+                                initialHighlightsJson = item.highlightsJson,
+                                initialPageInBook = null
+                            )
+                        }
+                    }
+
+                    runCatching {
+                        restoreEpubReaderBook(item, restoreUri)
+                    }.onSuccess { restoredBook ->
+                        _internalState.update { state ->
+                            if (state.selectedBookId != item.bookId) {
+                                state
+                            } else {
+                                state.copy(selectedEpubBook = restoredBook, isLoading = false, errorMessage = null)
+                            }
+                        }
+                        persistReaderSession(item.bookId, item.type)
+                        Timber.tag("ReaderRestore").i("Restored reader session for ${item.bookId} (${item.type}).")
+                    }.onFailure { error ->
+                        Timber.tag("ReaderRestore").e(error, "Failed to restore EPUB-like session for ${item.bookId}")
+                        clearPersistedReaderSession()
+                        _internalState.update { state ->
+                            if (state.selectedBookId != item.bookId) {
+                                state
+                            } else {
+                                state.copy(
+                                    selectedBookId = null,
+                                    selectedEpubUri = null,
+                                    selectedEpubBook = null,
+                                    selectedFileType = null,
+                                    isLoading = false,
+                                    errorMessage = appContext.getString(R.string.error_load_file, error.message)
+                                )
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    clearPersistedReaderSession()
+                }
+            }
+        }
+    }
+
+    private suspend fun restoreEpubReaderBook(item: RecentFileItem, uri: Uri): EpubBook {
+        return restoreEpubReaderBook(item.type, item.bookId, item.displayName, uri)
+    }
+
+    private suspend fun restoreEpubReaderBook(
+        type: FileType,
+        bookId: String,
+        displayName: String,
+        uri: Uri
+    ): EpubBook = withContext(Dispatchers.IO) {
+        appContext.contentResolver.openInputStream(uri).use { inputStream ->
+            if (inputStream == null) {
+                throw Exception("Could not open input stream for restore")
+            }
+
+            when (type) {
+                FileType.EPUB -> epubParser.createEpubBook(
+                    inputStream = inputStream,
+                    bookId = bookId,
+                    originalBookNameHint = displayName
+                )
+
+                FileType.MOBI -> mobiParser.createMobiBook(
+                    inputStream = inputStream,
+                    bookId = bookId,
+                    originalBookNameHint = displayName
+                ) ?: throw Exception("MobiParser returned null. The file might be DRM-protected or invalid.")
+
+                FileType.FB2 -> fb2Parser.createFb2Book(
+                    inputStream = inputStream,
+                    bookId = bookId,
+                    originalBookNameHint = displayName
+                )
+
+                FileType.ODT, FileType.FODT -> odtParser.createOdtBook(
+                    inputStream = inputStream,
+                    bookId = bookId,
+                    originalBookNameHint = displayName,
+                    isFlat = type == FileType.FODT
+                )
+
+                FileType.MD, FileType.TXT, FileType.HTML, FileType.DOCX -> singleFileImporter.importSingleFile(
+                    inputStream = inputStream,
+                    type = type,
+                    originalBookNameHint = displayName,
+                    bookId = bookId
+                )
+
+                else -> throw IllegalArgumentException("Unsupported reader restore type: $type")
+            }
+        }
+    }
+
+    fun recoverSelectedEpubContent() {
+        val state = _internalState.value
+        val bookId = state.selectedBookId ?: return
+        val uri = state.selectedEpubUri ?: return
+        val type = state.selectedFileType ?: return
+
+        if (type !in EPUB_READER_FILE_TYPES) return
+
+        val displayName = state.selectedEpubBook?.fileName
+            ?: state.selectedEpubBook?.title
+            ?: getFileNameFromUri(uri, appContext)
+            ?: "unknown_book"
+
+        viewModelScope.launch {
+            epubRecoveryMutex.withLock {
+                val latestState = _internalState.value
+                if (latestState.selectedBookId != bookId || latestState.selectedEpubUri != uri) {
+                    return@withLock
+                }
+                if (latestState.selectedEpubBook?.extractionBasePath?.let { path ->
+                        path.isNotBlank() && File(path).exists()
+                    } == true
+                ) {
+                    return@withLock
+                }
+
+                _internalState.update {
+                    if (it.selectedBookId == bookId) it.copy(isLoading = true, errorMessage = null) else it
+                }
+
+                runCatching {
+                    val item = recentFilesRepository.getFileByBookId(bookId)
+                    restoreEpubReaderBook(
+                        type = item?.type ?: type,
+                        bookId = bookId,
+                        displayName = item?.displayName ?: displayName,
+                        uri = uri
+                    )
+                }.onSuccess { restoredBook ->
+                    _internalState.update {
+                        if (it.selectedBookId == bookId && it.selectedEpubUri == uri) {
+                            it.copy(selectedEpubBook = restoredBook, isLoading = false, errorMessage = null)
+                        } else {
+                            it
+                        }
+                    }
+                    Timber.tag("EpubRecovery").i("Recovered missing extracted content for $bookId")
+                }.onFailure { error ->
+                    Timber.tag("EpubRecovery").e(error, "Failed to recover missing extracted content for $bookId")
+                    _internalState.update {
+                        if (it.selectedBookId == bookId && it.selectedEpubUri == uri) {
+                            it.copy(
+                                isLoading = false,
+                                errorMessage = appContext.getString(R.string.error_load_file, error.message)
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1323,6 +2273,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             putStringSet(KEY_FILTER_FILE_TYPES, filters.fileTypes.map { it.name }.toSet())
             putStringSet(KEY_FILTER_FOLDERS, filters.sourceFolders)
             putString(KEY_FILTER_READ_STATUS, filters.readStatus.name)
+            putStringSet(KEY_FILTER_TAG_IDS, filters.tagIds)
         }
 
         Timber.d("Library filters updated and persisted: $filters")
@@ -1593,6 +2544,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 initialPageInBook = null
             )
         }
+        clearPersistedReaderSession()
 
         if (closingBookId != null && closingBookId == externalOpenedBookId) {
             val behavior = prefs.getString(KEY_EXTERNAL_FILE_BEHAVIOR, "ASK") ?: "ASK"
@@ -1748,16 +2700,6 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 }
 
                 scanSyncedFolder()
-
-                val workManager = WorkManager.getInstance(appContext)
-                val constraints = Constraints.Builder().setRequiresBatteryNotLow(true).build()
-                val syncRequest =
-                    PeriodicWorkRequestBuilder<FolderSyncWorker>(4, TimeUnit.HOURS).setConstraints(
-                        constraints
-                    ).build()
-                workManager.enqueueUniquePeriodicWork(
-                    FolderSyncWorker.WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, syncRequest
-                )
 
                 showBanner(appContext.getString(R.string.banner_folder_added, name))
 
@@ -1923,38 +2865,6 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
             WorkManager.getInstance(appContext).cancelUniqueWork(FolderSyncWorker.WORK_NAME)
         }
-    }
-
-    private suspend fun prepareBookForImport(externalUri: Uri): Triple<Uri, String, FileType>? {
-        val type = getFileTypeFromUri(externalUri, appContext)
-        if (type == null) {
-            Timber.e("Could not determine file type for external URI: $externalUri")
-            return null
-        }
-
-        val hash = FileHasher.calculateSha256 {
-            appContext.contentResolver.openInputStream(externalUri)
-        }
-
-        if (hash == null) {
-            Timber.e("Failed to process file hash for $externalUri")
-            return null
-        }
-
-        val existingItem = recentFilesRepository.getFileByBookId(hash)
-        if (existingItem != null) {
-            Timber.i("Book with ID: $hash already exists. Skipping import.")
-            return null
-        }
-
-        Timber.i("Importing new book with ID: $hash")
-        val internalFile = bookImporter.importBook(externalUri)
-        if (internalFile == null) {
-            Timber.e("Failed to copy book to internal storage for $externalUri")
-            return null
-        }
-
-        return Triple(internalFile.toUri(), hash, type)
     }
 
     private fun downloadBook(item: RecentFileItem, openWhenComplete: Boolean = false): Job {
@@ -2568,7 +3478,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         epubBook: EpubBook? = null,
         customDisplayName: String? = null,
         isRecent: Boolean,
-        sourceFolderUri: String? = null
+        sourceFolderUri: String? = null,
+        bundleResult: CalibreBundleResult? = null
     ) = withContext(Dispatchers.IO) {
         val addStart = System.currentTimeMillis()
         Timber.tag("FileOpenPerf")
@@ -2600,12 +3511,15 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             uri, appContext
         ) ?: "Unknown File"
 
-        var coverPath: String? = null
-        var title: String? = null
-        var author: String? = null
+        var coverPath: String? = bundleResult?.coverCachePath
+        var title: String? = bundleResult?.title
+        var author: String? = bundleResult?.author
+        var seriesName: String? = bundleResult?.seriesName
+        var seriesIndex: Double? = bundleResult?.seriesIndex
+        var description: String? = bundleResult?.description
         var bookForMetadata = epubBook
 
-        if (bookForMetadata == null && (type == FileType.EPUB || type == FileType.MOBI || type == FileType.FB2 || type == FileType.MD || type == FileType.TXT || type == FileType.HTML || type == FileType.DOCX || type == FileType.ODT || type == FileType.FODT)) {
+        if (bookForMetadata == null && bundleResult == null && (type == FileType.EPUB || type == FileType.MOBI || type == FileType.FB2 || type == FileType.MD || type == FileType.TXT || type == FileType.HTML || type == FileType.DOCX || type == FileType.ODT || type == FileType.FODT)) {
             Timber.d("Parsing downloaded book for cover/metadata: $displayName")
             Timber.tag("FileOpenPerf")
                 .d("[$bookId] addFileToRecent: Starting metadata parsing (no book provided)")
@@ -2677,18 +3591,23 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         val finalBookMetadata = bookForMetadata
 
         if ((type == FileType.EPUB || type == FileType.MOBI || type == FileType.FB2 || type == FileType.MD || type == FileType.TXT || type == FileType.HTML || type == FileType.DOCX || type == FileType.ODT || type == FileType.FODT) && finalBookMetadata != null) {
-            title =
-                finalBookMetadata.title.takeIf { it.isNotBlank() && it != "content" } ?: displayName
+            title = title ?: finalBookMetadata.title.takeIf { it.isNotBlank() && it != "content" } ?: displayName
 
-            author = finalBookMetadata.author.takeIf {
+            author = author ?: finalBookMetadata.author.takeIf {
                 it.isNotBlank() && !it.equals("Unknown", ignoreCase = true)
             }
 
-            finalBookMetadata.coverImage?.let { cover ->
-                coverPath = recentFilesRepository.saveCoverToCache(cover, uri)
+            if (coverPath == null) {
+                finalBookMetadata.coverImage?.let { cover ->
+                    coverPath = recentFilesRepository.saveCoverToCache(cover, uri)
+                }
             }
+
+            seriesName = seriesName ?: finalBookMetadata.seriesName
+            seriesIndex = seriesIndex ?: finalBookMetadata.seriesIndex
+            description = description ?: finalBookMetadata.description
         } else if (type == FileType.PDF || type == FileType.CBZ || type == FileType.CBR || type == FileType.CB7) {
-            title = displayName
+            title = title ?: displayName
 
             if (type == FileType.PDF) {
                 try {
@@ -2698,12 +3617,12 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         val meta = pdfiumCore.getDocumentMeta(pdfDocument)
 
                         val extractedTitle = meta.title
-                        if (!extractedTitle.isNullOrBlank()) {
+                        if (!extractedTitle.isNullOrBlank() && title == displayName) {
                             title = extractedTitle
                         }
 
                         val extractedAuthor = meta.author
-                        if (!extractedAuthor.isNullOrBlank()) {
+                        if (!extractedAuthor.isNullOrBlank() && author == null) {
                             author = extractedAuthor
                         }
 
@@ -2713,49 +3632,53 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     Timber.e(e, "Failed to extract PDF title using PdfiumCore")
                 }
 
-                val pdfCoverGenerator = PdfCoverGenerator(appContext)
-                val coverBitmap = pdfCoverGenerator.generateCover(uri)
-                if (coverBitmap != null) {
-                    coverPath = recentFilesRepository.saveCoverToCache(coverBitmap, uri)
+                if (coverPath == null) {
+                    val pdfCoverGenerator = PdfCoverGenerator(appContext)
+                    val coverBitmap = pdfCoverGenerator.generateCover(uri)
+                    if (coverBitmap != null) {
+                        coverPath = recentFilesRepository.saveCoverToCache(coverBitmap, uri)
+                    }
                 }
             } else if (uri.scheme != "opds-pse" && (type == FileType.CBZ || type == FileType.CBR || type == FileType.CB7)) {
-                var cacheFile: File? = null
-                try {
-                    cacheFile = File(appContext.cacheDir, "temp_archive_cover_${System.currentTimeMillis()}.${type.name.lowercase()}")
-                    withContext(Dispatchers.IO) {
-                        appContext.contentResolver.openInputStream(uri)?.use { input ->
-                            cacheFile.outputStream().use { output -> input.copyTo(output) }
-                        }
-                    }
-                    val archiveDoc = com.aryan.reader.pdf.ArchiveDocumentWrapper(cacheFile)
-                    if (archiveDoc.getPageCount() > 0) {
-                        val page = archiveDoc.openPage(0)
-                        if (page != null) {
-                            val w = page.getPageWidthPoint()
-                            val h = page.getPageHeightPoint()
-                            if (w > 0 && h > 0) {
-                                val targetHeight = 800
-                                val targetWidth = (targetHeight * (w.toFloat() / h.toFloat())).toInt()
-                                if (targetWidth > 0) {
-                                    val bitmap = createBitmap(targetWidth, targetHeight)
-                                    page.renderPageBitmap(bitmap, 0, 0, targetWidth, targetHeight, false)
-                                    coverPath = recentFilesRepository.saveCoverToCache(bitmap, uri)
-                                }
-                            }
-                            page.close()
-                        }
-                    }
-                    archiveDoc.close()
-                } catch (e: Exception) {
-                    Timber.e(e, "Error generating CBZ cover")
-                } finally {
+                if (coverPath == null) {
+                    var cacheFile: File? = null
                     try {
-                        if (cacheFile?.exists() == true) {
-                            val deleted = cacheFile.delete()
-                            if (deleted) Timber.d("Successfully deleted temp archive file: ${cacheFile.name}")
+                        cacheFile = File(appContext.cacheDir, "temp_archive_cover_${System.currentTimeMillis()}.${type.name.lowercase()}")
+                        withContext(Dispatchers.IO) {
+                            appContext.contentResolver.openInputStream(uri)?.use { input ->
+                                cacheFile.outputStream().use { output -> input.copyTo(output) }
+                            }
                         }
+                        val archiveDoc = com.aryan.reader.pdf.ArchiveDocumentWrapper(cacheFile)
+                        if (archiveDoc.getPageCount() > 0) {
+                            val page = archiveDoc.openPage(0)
+                            if (page != null) {
+                                val w = page.getPageWidthPoint()
+                                val h = page.getPageHeightPoint()
+                                if (w > 0 && h > 0) {
+                                    val targetHeight = 800
+                                    val targetWidth = (targetHeight * (w.toFloat() / h.toFloat())).toInt()
+                                    if (targetWidth > 0) {
+                                        val bitmap = createBitmap(targetWidth, targetHeight)
+                                        page.renderPageBitmap(bitmap, 0, 0, targetWidth, targetHeight, false)
+                                        coverPath = recentFilesRepository.saveCoverToCache(bitmap, uri)
+                                    }
+                                }
+                                page.close()
+                            }
+                        }
+                        archiveDoc.close()
                     } catch (e: Exception) {
-                        Timber.e(e, "Failed to delete temp archive file")
+                        Timber.e(e, "Error generating CBZ cover")
+                    } finally {
+                        try {
+                            if (cacheFile?.exists() == true) {
+                                val deleted = cacheFile.delete()
+                                if (deleted) Timber.d("Successfully deleted temp archive file: ${cacheFile.name}")
+                            }
+                        } catch (e: Exception) {
+                            Timber.e(e, "Failed to delete temp archive file")
+                        }
                     }
                 }
             }
@@ -2778,7 +3701,10 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             isDeleted = false,
             isRecent = isRecent,
             sourceFolderUri = sourceFolderUri,
-            fileSize = fileSize
+            fileSize = fileSize,
+            seriesName = seriesName,
+            seriesIndex = seriesIndex,
+            description = description
         )
         recentFilesRepository.addRecentFile(newItem)
         Timber.i("Added/Updated $displayName ($type) to recent files via repository.")
@@ -2820,6 +3746,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 val oneHourAgo = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(1)
                 val allDbIds = recentFilesRepository.getAllFilesForSync().map { it.bookId }.toSet()
                 val validStreamHashes = allDbIds.map { it.hashCode().toString() }.toSet()
+                ImportedFileCache.deleteStaleTemporaryBookDirs(appContext, TimeUnit.HOURS.toMillis(1))
 
                 cacheDir.listFiles()?.forEach { file ->
                     val name = file.name
@@ -2828,7 +3755,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                             val deleted = if (file.isDirectory) file.deleteRecursively() else file.delete()
                             if (deleted) Timber.d("Sweeper cleaned old temp file: $name")
                         }
-                    } else if (name.startsWith("imported_file_")) {
+                    } else if (ImportedFileCache.isActiveBookDir(name)) {
                         val bookId = name.removePrefix("imported_file_")
                         if (bookId !in allDbIds) {
                             val deleted = file.deleteRecursively()
@@ -2856,14 +3783,22 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     private fun getFileNameFromUri(uri: Uri, context: Context): String? {
         var fileName: String? = null
         if (uri.scheme == "content") {
-            val cursor: Cursor? = context.contentResolver.query(uri, null, null, null, null)
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (nameIndex != -1) {
-                        fileName = it.getString(nameIndex)
+            try {
+                val cursor: Cursor? = context.contentResolver.query(uri, null, null, null, null)
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIndex != -1) {
+                            fileName = it.getString(nameIndex)
+                        }
                     }
                 }
+            } catch (e: SecurityException) {
+                Timber.w(e, "Permission denied while resolving display name for URI: $uri")
+            } catch (e: IllegalArgumentException) {
+                Timber.w(e, "Provider rejected display-name query for URI: $uri")
+            } catch (e: RuntimeException) {
+                Timber.w(e, "Unexpected failure while resolving display name for URI: $uri")
             }
         }
         if (fileName == null) {
@@ -2910,7 +3845,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                             bookId = bookId,
                             customDisplayName = displayName,
                             isRecent = false,
-                            sourceFolderUri = null
+                            sourceFolderUri = null,
+                            bundleResult = importResult.bundleResult
                         )
                         importedCount++
                     } else {
@@ -2960,30 +3896,48 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         viewModelScope.launch {
-            val importResult = prepareBookForImport(externalUri)
+            try {
+                val importResult = prepareBookForImport(externalUri)
 
-            if (importResult != null) {
-                val (internalUri, bookId, type) = importResult
-                if (isExternalIntent) {
-                    externalOpenedBookId = bookId
-                }
-                val displayName = getFileNameFromUri(externalUri, appContext) ?: "Unknown File"
-                openBook(
-                    internalUri, bookId = bookId, type = type, originalDisplayName = displayName
-                )
-            } else {
-                val hash = FileHasher.calculateSha256 {
-                    appContext.contentResolver.openInputStream(externalUri)
-                }
-                if (hash != null) {
-                    val existingItem = recentFilesRepository.getFileByBookId(hash)
-                    if (existingItem != null) {
-                        Timber.i("Re-selected an existing book. Opening it.")
-                        onRecentFileClicked(existingItem)
-                        _internalState.update { it.copy(isLoading = false) }
-                        return@launch
+                if (importResult != null) {
+                    val (internalUri, bookId, type) = importResult
+                    if (isExternalIntent) {
+                        externalOpenedBookId = bookId
+                    }
+                    val displayName = getFileNameFromUri(externalUri, appContext) ?: "Unknown File"
+                    openBook(
+                        internalUri, bookId = bookId, type = type,
+                        originalDisplayName = displayName, bundleResult = importResult.bundleResult
+                    )
+                } else {
+                    val hash = FileHasher.calculateSha256 {
+                        appContext.contentResolver.openInputStream(externalUri)
+                    }
+                    if (hash != null) {
+                        val existingItem = recentFilesRepository.getFileByBookId(hash)
+                        if (existingItem != null) {
+                            Timber.i("Re-selected an existing book. Opening it.")
+                            onRecentFileClicked(existingItem)
+                            _internalState.update { it.copy(isLoading = false) }
+                            return@launch
+                        }
+                    }
+                    _internalState.update {
+                        it.copy(isLoading = false, errorMessage = appContext.getString(R.string.error_import_file_failed))
                     }
                 }
+            } catch (e: SecurityException) {
+                Timber.e(e, "Permission denied while importing URI: $externalUri")
+                _internalState.update {
+                    it.copy(isLoading = false, errorMessage = appContext.getString(R.string.error_import_file_failed))
+                }
+            } catch (e: IllegalArgumentException) {
+                Timber.e(e, "Provider rejected URI import for: $externalUri")
+                _internalState.update {
+                    it.copy(isLoading = false, errorMessage = appContext.getString(R.string.error_import_file_failed))
+                }
+            } catch (e: RuntimeException) {
+                Timber.e(e, "Unexpected import failure for URI: $externalUri")
                 _internalState.update {
                     it.copy(isLoading = false, errorMessage = appContext.getString(R.string.error_import_file_failed))
                 }
@@ -3035,6 +3989,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             val bookId = item.bookId
 
             if (type == FileType.PDF || type == FileType.CBZ || type == FileType.CBR || type == FileType.CB7) {
+                persistReaderSession(bookId, type)
                 _internalState.update {
                     it.copy(
                         selectedEpubUri = null,
@@ -3064,15 +4019,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 stateUpdateDeferred.complete(true)
 
             } else {
-                val epubBook = withContext(Dispatchers.IO) {
-                    appContext.contentResolver.openInputStream(uri)?.use { inputStream ->
-                        singleFileImporter.importSingleFile(
-                            inputStream, type, item.displayName, bookId
-                        )
-                    }
-                }
-
-                if (epubBook != null) {
+                persistReaderSession(bookId, type)
+                try {
+                    val epubBook = restoreEpubReaderBook(type, bookId, item.displayName, uri)
                     _internalState.update {
                         it.copy(
                             selectedPdfUri = null,
@@ -3105,11 +4054,12 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     Timber.tag("FileSwitch").d("EPUB state updated, emitting navigation event")
                     _navigationEvent.send(NavigationEvent("epub_reader", bookId, uri))
                     stateUpdateDeferred.complete(true)
-                } else {
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to switch seamlessly to $type book: $bookId")
                     _internalState.update {
                         it.copy(
                             isLoading = false,
-                            errorMessage = appContext.getString(R.string.error_load_generated_text_view),
+                            errorMessage = appContext.getString(R.string.error_load_file, e.message),
                             selectedFileType = null
                         )
                     }
@@ -3190,18 +4140,15 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun clearImportedFileCache(bookId: String) {
         try {
-            val cacheDir = File(appContext.cacheDir, "imported_file_$bookId")
-            if (cacheDir.exists()) {
-                val deleted = cacheDir.deleteRecursively()
-                Timber.tag("FileCleanup").d("Deleted imported cache for $bookId: $deleted")
-            }
+            ImportedFileCache.clearBookCache(appContext, bookId)
+            Timber.tag("FileCleanup").d("Deleted imported cache for $bookId")
         } catch (e: Exception) {
             Timber.e(e, "Failed to clear imported file cache for $bookId")
         }
     }
 
     private fun openBook(
-        uri: Uri, bookId: String, type: FileType, originalDisplayName: String? = null, suppressNavigation: Boolean = false
+        uri: Uri, bookId: String, type: FileType, originalDisplayName: String? = null, suppressNavigation: Boolean = false, bundleResult: CalibreBundleResult? = null
     ) {
         val openBookStartTime = System.currentTimeMillis()
         Timber.tag("FileOpenPerf")
@@ -3287,13 +4234,15 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                             isLoading = false
                         )
                     }
+                    persistReaderSession(bookId, type)
                     addFileToRecent(
                         uri,
                         type,
                         bookId,
                         customDisplayName = originalDisplayName,
                         isRecent = true,
-                        sourceFolderUri = null
+                        sourceFolderUri = null,
+                        bundleResult = bundleResult
                     )
 
                     if (!suppressNavigation) {
@@ -3333,6 +4282,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                             initialHighlightsJson = recentItem?.highlightsJson,
                         )
                     }
+                    persistReaderSession(bookId, type)
 
                     if (!suppressNavigation) {
                         Timber.tag("FileSwitch").d("EPUB state updated, emitting navigation event")
@@ -3341,22 +4291,22 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
                     when (type) {
                         FileType.EPUB -> {
-                            loadEpub(uri, bookId, customDisplayName = originalDisplayName)
+                            loadEpub(uri, bookId, customDisplayName = originalDisplayName, bundleResult = bundleResult)
                         }
 
                         FileType.MOBI -> {
-                            loadMobi(uri, bookId, customDisplayName = originalDisplayName)
+                            loadMobi(uri, bookId, customDisplayName = originalDisplayName, bundleResult = bundleResult)
                         }
 
                         FileType.FB2 -> {
-                            loadFb2(uri, bookId, customDisplayName = originalDisplayName)
+                            loadFb2(uri, bookId, customDisplayName = originalDisplayName, bundleResult = bundleResult)
                         }
                         FileType.ODT, FileType.FODT -> {
-                            loadOdt(uri, bookId, type == FileType.FODT, customDisplayName = originalDisplayName)
+                            loadOdt(uri, bookId, type == FileType.FODT, customDisplayName = originalDisplayName, bundleResult = bundleResult)
                         }
                         else -> {
                             loadSingleFile(
-                                uri, bookId, type, customDisplayName = originalDisplayName
+                                uri, bookId, type, customDisplayName = originalDisplayName, bundleResult = bundleResult
                             )
                         }
                     }
@@ -3365,7 +4315,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun loadFb2(uri: Uri, bookId: String, customDisplayName: String? = null) {
+    private fun loadFb2(uri: Uri, bookId: String, customDisplayName: String? = null, bundleResult: CalibreBundleResult? = null) {
         val loadStart = System.currentTimeMillis()
         Timber.tag("FileOpenPerf").d("[$bookId] loadFb2 START")
         viewModelScope.launch {
@@ -3388,7 +4338,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 Timber.tag("FileOpenPerf").d("[$bookId] loadFb2 completed | chapters=${fb2Book.chapters.size} | elapsed=${System.currentTimeMillis() - loadStart}ms")
 
                 addFileToRecent(
-                    uri, FileType.FB2, bookId, fb2Book, customDisplayName, isRecent = true, sourceFolderUri = null
+                    uri, FileType.FB2, bookId, fb2Book, customDisplayName, isRecent = true, sourceFolderUri = null, bundleResult = bundleResult
                 )
 
                 _internalState.update { it.copy(selectedEpubBook = fb2Book, isLoading = false) }
@@ -3401,7 +4351,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun loadOdt(uri: Uri, bookId: String, isFlat: Boolean, customDisplayName: String? = null) {
+    private fun loadOdt(uri: Uri, bookId: String, isFlat: Boolean, customDisplayName: String? = null, bundleResult: CalibreBundleResult? = null) {
         val loadStart = System.currentTimeMillis()
         Timber.tag("FileOpenPerf").d("[$bookId] loadOdt START | isFlat=$isFlat")
         viewModelScope.launch {
@@ -3425,7 +4375,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 Timber.tag("FileOpenPerf").d("[$bookId] loadOdt completed | chapters=${odtBook.chapters.size} | elapsed=${System.currentTimeMillis() - loadStart}ms")
 
                 addFileToRecent(
-                    uri, if (isFlat) FileType.FODT else FileType.ODT, bookId, odtBook, customDisplayName, isRecent = true, sourceFolderUri = null
+                    uri, if (isFlat) FileType.FODT else FileType.ODT, bookId, odtBook, customDisplayName, isRecent = true, sourceFolderUri = null, bundleResult = bundleResult
                 )
 
                 _internalState.update { it.copy(selectedEpubBook = odtBook, isLoading = false) }
@@ -3442,7 +4392,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         uri: Uri,
         bookId: String,
         type: FileType,
-        customDisplayName: String? = null
+        customDisplayName: String? = null,
+        bundleResult: CalibreBundleResult? = null
     ) {
         val loadStart = System.currentTimeMillis()
         Timber.tag("FileOpenPerf").d("[$bookId] loadSingleFile START | type=$type")
@@ -3478,7 +4429,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     epubBook,
                     customDisplayName,
                     isRecent = true,
-                    sourceFolderUri = null
+                    sourceFolderUri = null,
+                    bundleResult = bundleResult
                 )
 
                 _internalState.update { it.copy(selectedEpubBook = epubBook, isLoading = false) }
@@ -3499,7 +4451,18 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun getFileTypeFromUri(uri: Uri, context: Context): FileType? {
-        val mimeType = context.contentResolver.getType(uri)
+        val mimeType = try {
+            context.contentResolver.getType(uri)
+        } catch (e: SecurityException) {
+            Timber.w(e, "Permission denied while resolving MIME type for URI: $uri")
+            null
+        } catch (e: IllegalArgumentException) {
+            Timber.w(e, "Provider rejected MIME type lookup for URI: $uri")
+            null
+        } catch (e: RuntimeException) {
+            Timber.w(e, "Unexpected failure while resolving MIME type for URI: $uri")
+            null
+        }
         val fileName = getFileNameFromUri(uri, context)
 
         Timber.d("Determining type for: $uri | Mime: $mimeType | Name: $fileName")
@@ -3616,7 +4579,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun loadMobi(uri: Uri, bookId: String, customDisplayName: String? = null) {
+    private fun loadMobi(uri: Uri, bookId: String, customDisplayName: String? = null, bundleResult: CalibreBundleResult? = null) {
         viewModelScope.launch {
             if (!_internalState.value.isLoading) {
                 _internalState.update { it.copy(isLoading = true, errorMessage = null) }
@@ -3645,7 +4608,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         mobiAsEpubBook,
                         customDisplayName,
                         isRecent = true,
-                        sourceFolderUri = null
+                        sourceFolderUri = null,
+                        bundleResult = bundleResult
                     )
                     _internalState.update {
                         it.copy(selectedEpubBook = mobiAsEpubBook, isLoading = false)
@@ -3664,7 +4628,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun loadEpub(uri: Uri, bookId: String, customDisplayName: String? = null) {
+    private fun loadEpub(uri: Uri, bookId: String, customDisplayName: String? = null, bundleResult: CalibreBundleResult? = null) {
         val loadStart = System.currentTimeMillis()
         Timber.tag("FileOpenPerf").d("[$bookId] loadEpub START")
         viewModelScope.launch {
@@ -3696,7 +4660,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     epubBook,
                     customDisplayName,
                     isRecent = true,
-                    sourceFolderUri = null
+                    sourceFolderUri = null,
+                    bundleResult = bundleResult
                 )
 
                 _internalState.update { it.copy(selectedEpubBook = epubBook, isLoading = false) }
@@ -3762,16 +4727,56 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             } else {
                 0f
             }
-            Timber.tag("PdfPositionDebug").d("ViewModel: Saving to DB | Page: $page | Total: $totalPages | URI: ${currentPdfUri.lastPathSegment}")
+            Timber.tag("PdfPositionDebug").i("ViewModel: Save request triggered | Page: $page | Total: $totalPages | Progress: $progress | URI: ${currentPdfUri.lastPathSegment}")
             viewModelScope.launch {
                 recentFilesRepository.getFileByUri(currentPdfUri.toString())?.let { _ ->
                     recentFilesRepository.updatePdfReadingPosition(
                         uriString = currentPdfUri.toString(), page = page, progress = progress
                     )
+                } ?: run {
+                    Timber.tag("PdfPositionDebug").e("ViewModel: Save aborted. Could not resolve file item from URI in DB.")
                 }
             }
         } else {
             Timber.tag("PdfPositionDebug").w("ViewModel: Save aborted. No selectedPdfUri found in state.")
+        }
+    }
+
+    fun exportLogsToFile(activityContext: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                Timber.d("Generating logcat dump for debugging...")
+                val logFile = File(appContext.cacheDir, "debug_logs_${System.currentTimeMillis()}.txt")
+
+                val process = Runtime.getRuntime().exec("logcat -d -v threadtime -t 5000")
+                process.inputStream.bufferedReader().use { reader ->
+                    logFile.writeText(reader.readText())
+                }
+
+                val authority = "${appContext.packageName}.provider"
+                val uri = androidx.core.content.FileProvider.getUriForFile(appContext, authority, logFile)
+
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_TITLE, "App Debug Logs")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+
+                val chooser = Intent.createChooser(intent, "Export Debug Logs")
+                if (activityContext !is android.app.Activity) {
+                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+
+                withContext(Dispatchers.Main) {
+                    activityContext.startActivity(chooser)
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to export logs")
+                withContext(Dispatchers.Main) {
+                    showBanner("Failed to export logs", isError = true)
+                }
+            }
         }
     }
 
@@ -3978,215 +4983,178 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun createShelf(name: String) {
         if (name.isNotBlank()) {
-            val currentShelves = prefs.getStringSet(KEY_SHELVES, emptySet()) ?: emptySet()
-            val newTimestamp = System.currentTimeMillis()
-            prefs.edit {
-                putStringSet(KEY_SHELVES, currentShelves + name)
-                putLong("$KEY_SHELF_TIMESTAMP_PREFIX$name", newTimestamp)
-                putStringSet("$KEY_SHELF_CONTENT_PREFIX$name", emptySet())
-                putBoolean("$KEY_SHELF_DELETED_PREFIX$name", false)
+            viewModelScope.launch {
+                val shelfId = UUID.randomUUID().toString()
+                val shelf = com.aryan.reader.data.ShelfEntity(
+                    id = shelfId,
+                    name = name,
+                    isSmart = false,
+                    smartRulesJson = null,
+                    createdAt = System.currentTimeMillis(),
+                    updatedAt = System.currentTimeMillis()
+                )
+                recentFilesRepository.addShelf(shelf)
+                dismissCreateShelfDialog()
+                syncShelfChangeToFirestore(shelfId)
             }
-            dismissCreateShelfDialog()
-            syncShelfChangeToFirestore(name)
         }
     }
 
     fun setMainScreenPage(page: Int) {
-        _internalState.update { it.copy(mainScreenStartPage = page) }
+        val sanitizedPage = page.coerceIn(0, 1)
+        _internalState.update { it.copy(mainScreenStartPage = sanitizedPage) }
+        persistLibraryLandingState()
     }
 
     fun setLibraryScreenPage(page: Int) {
-        _internalState.update { it.copy(libraryScreenStartPage = page) }
-    }
-
-    fun navigateToShelf(name: String) {
+        val maxLibraryPage = if (BuildConfig.IS_OFFLINE) 2 else 3
+        val sanitizedPage = page.coerceIn(0, maxLibraryPage)
         _internalState.update {
-            it.copy(viewingShelfName = name, mainScreenStartPage = 1, libraryScreenStartPage = 1)
+            it.copy(libraryScreenStartPage = sanitizedPage)
         }
+        persistLibraryLandingState()
     }
 
-    fun showRenameShelfDialog(shelfName: String) {
-        _internalState.update { it.copy(showRenameShelfDialogFor = shelfName) }
+    fun navigateToShelf(id: String) {
+        _internalState.update {
+            it.copy(viewingShelfId = id, mainScreenStartPage = 1, libraryScreenStartPage = 1)
+        }
+        persistLibraryLandingState()
+    }
+
+    fun showRenameShelfDialog(shelfId: String) {
+        _internalState.update { it.copy(showRenameShelfDialogFor = shelfId) }
     }
 
     fun dismissRenameShelfDialog() {
         _internalState.update { it.copy(showRenameShelfDialogFor = null) }
     }
 
-    fun showDeleteShelfDialog(shelfName: String) {
-        _internalState.update { it.copy(showDeleteShelfDialogFor = shelfName) }
+    fun showDeleteShelfDialog(shelfId: String) {
+        _internalState.update { it.copy(showDeleteShelfDialogFor = shelfId) }
     }
 
     fun dismissDeleteShelfDialog() {
         _internalState.update { it.copy(showDeleteShelfDialogFor = null) }
     }
 
-    fun renameShelf(oldName: String, newName: String) {
-        if (oldName.isBlank() || newName.isBlank() || oldName == newName) {
+    fun renameShelf(shelfId: String, newName: String) {
+        if (shelfId.isBlank() || newName.isBlank()) {
             dismissRenameShelfDialog()
             return
         }
-
-        val currentShelves =
-            prefs.getStringSet(KEY_SHELVES, emptySet())?.toMutableSet() ?: mutableSetOf()
-
-        if (newName in currentShelves) {
-            Timber.w("Cannot rename shelf. A shelf with the name '$newName' already exists.")
-            _internalState.update {
-                it.copy(errorMessage = appContext.getString(R.string.error_shelf_exists))
-            }
+        viewModelScope.launch {
+            recentFilesRepository.renameShelf(shelfId, newName)
+            syncShelfChangeToFirestore(shelfId)
+            _internalState.update { it.copy(viewingShelfId = shelfId) }
+            persistLibraryLandingState()
             dismissRenameShelfDialog()
-            return
         }
-
-        val oldContentKey = "$KEY_SHELF_CONTENT_PREFIX$oldName"
-        val shelfContent = prefs.getStringSet(oldContentKey, emptySet()) ?: emptySet()
-        val newTimestamp = System.currentTimeMillis()
-
-        prefs.edit {
-            currentShelves.remove(oldName)
-            putBoolean("$KEY_SHELF_DELETED_PREFIX$oldName", true)
-            putLong("$KEY_SHELF_TIMESTAMP_PREFIX$oldName", newTimestamp)
-
-            currentShelves.add(newName)
-            putStringSet(KEY_SHELVES, currentShelves)
-            putStringSet("$KEY_SHELF_CONTENT_PREFIX$newName", shelfContent)
-            putLong("$KEY_SHELF_TIMESTAMP_PREFIX$newName", newTimestamp)
-        }
-
-        syncShelfChangeToFirestore(oldName)
-        syncShelfChangeToFirestore(newName)
-
-        _internalState.update { it.copy(viewingShelfName = newName) }
-        dismissRenameShelfDialog()
     }
 
-    fun deleteShelf(shelfName: String) {
-        if (shelfName.isBlank() || shelfName == "Unshelved") {
+    fun deleteShelf(shelfId: String) {
+        if (shelfId.isBlank() || shelfId == "unshelved") {
             dismissDeleteShelfDialog()
             return
         }
-
-        _internalState.update {
-            it.copy(
-                viewingShelfName = null,
-                isAddingBooksToShelf = false,
-                showDeleteShelfDialogFor = null
-            )
+        viewModelScope.launch {
+            _internalState.update {
+                it.copy(viewingShelfId = null, isAddingBooksToShelf = false, showDeleteShelfDialogFor = null)
+            }
+            persistLibraryLandingState()
+            recentFilesRepository.deleteShelf(shelfId)
+            syncShelfChangeToFirestore(shelfId)
         }
-
-        prefs.edit {
-            val currentShelves =
-                prefs.getStringSet(KEY_SHELVES, emptySet())?.toMutableSet() ?: mutableSetOf()
-            currentShelves.remove(shelfName)
-            putStringSet(KEY_SHELVES, currentShelves)
-            putBoolean("$KEY_SHELF_DELETED_PREFIX$shelfName", true)
-            putLong("$KEY_SHELF_TIMESTAMP_PREFIX$shelfName", System.currentTimeMillis())
-        }
-        syncShelfChangeToFirestore(shelfName)
     }
 
     fun unselectShelf() {
-        _internalState.update { it.copy(viewingShelfName = null, isAddingBooksToShelf = false) }
+        _internalState.update { it.copy(viewingShelfId = null, isAddingBooksToShelf = false) }
+        persistLibraryLandingState()
+    }
+
+    fun navigateBackFromShelf() {
+        val currentShelf = uiState.value.shelves.find { it.id == _internalState.value.viewingShelfId }
+        val parentShelfId = currentShelf?.takeIf { it.type == ShelfType.FOLDER }?.parentShelfId
+        if (parentShelfId != null) {
+            _internalState.update { it.copy(viewingShelfId = parentShelfId, isAddingBooksToShelf = false) }
+            persistLibraryLandingState()
+        } else {
+            unselectShelf()
+        }
     }
 
     fun removeContextualItemsFromShelf() {
-        val shelfName = _internalState.value.viewingShelfName
-        if (shelfName.isNullOrBlank() || shelfName == "Unshelved") {
-            Timber.w("Attempted to remove items from an invalid or unshelved shelf: $shelfName")
+        val shelfId = _internalState.value.viewingShelfId
+        if (shelfId.isNullOrBlank() || shelfId == "unshelved") {
             clearContextualAction()
             return
         }
 
-        val bookIdsToRemove = _internalState.value.contextualActionItems.map { it.bookId }.toSet()
+        val bookIdsToRemove = _internalState.value.contextualActionItems.map { it.bookId }
         if (bookIdsToRemove.isEmpty()) {
-            Timber.w("removeContextualItemsFromShelf called but no items were selected.")
             clearContextualAction()
             return
         }
 
-        Timber.d("Removing ${bookIdsToRemove.size} book(s) from shelf '$shelfName'.")
-        val key = "$KEY_SHELF_CONTENT_PREFIX$shelfName"
-        val currentBookIds = prefs.getStringSet(key, emptySet())?.toMutableSet() ?: mutableSetOf()
-
-        currentBookIds.removeAll(bookIdsToRemove)
-
-        prefs.edit {
-            putStringSet(key, currentBookIds)
-            putLong("$KEY_SHELF_TIMESTAMP_PREFIX$shelfName", System.currentTimeMillis())
+        viewModelScope.launch {
+            recentFilesRepository.removeBooksFromShelf(shelfId, bookIdsToRemove)
+            clearContextualAction()
+            syncShelfChangeToFirestore(shelfId)
         }
-        Timber.d(
-            "Successfully removed books. Shelf '$shelfName' now has ${currentBookIds.size} books."
-        )
-
-        clearContextualAction()
-        syncShelfChangeToFirestore(shelfName)
     }
 
     fun onShelfClick(shelf: Shelf) {
-        if (_internalState.value.contextualActionShelfNames.isNotEmpty()) {
-            toggleShelfSelection(shelf.name)
+        if (_internalState.value.contextualActionShelfIds.isNotEmpty()) {
+            toggleShelfSelection(shelf)
         } else {
-            navigateToShelf(shelf.name)
+            navigateToShelf(shelf.id)
         }
     }
 
-    private fun toggleShelfSelection(shelfName: String) {
-        if (shelfName == "Unshelved") return
+    private fun toggleShelfSelection(shelf: Shelf) {
+        if (shelf.type != ShelfType.MANUAL) return
 
         _internalState.update { state ->
-            val currentSelection = state.contextualActionShelfNames
-            val newSelection = if (shelfName in currentSelection) {
-                currentSelection - shelfName
+            val currentSelection = state.contextualActionShelfIds
+            val newSelection = if (shelf.id in currentSelection) {
+                currentSelection - shelf.id
             } else {
-                currentSelection + shelfName
+                currentSelection + shelf.id
             }
-            state.copy(contextualActionShelfNames = newSelection)
+            state.copy(contextualActionShelfIds = newSelection)
         }
     }
 
     fun onShelfLongPress(shelf: Shelf) {
-        if (shelf.name == "Unshelved") return // Cannot select "Unshelved"
-        val currentSelection = _internalState.value.contextualActionShelfNames
-        if (shelf.name !in currentSelection) {
+        if (shelf.type != ShelfType.MANUAL || shelf.id == "unshelved") return
+        val currentSelection = _internalState.value.contextualActionShelfIds
+        if (shelf.id !in currentSelection) {
             _internalState.update {
-                it.copy(contextualActionShelfNames = currentSelection + shelf.name)
+                it.copy(contextualActionShelfIds = currentSelection + shelf.id)
             }
         }
     }
 
     fun clearShelfContextualAction() {
-        if (_internalState.value.contextualActionShelfNames.isNotEmpty()) {
-            _internalState.update { it.copy(contextualActionShelfNames = emptySet()) }
+        if (_internalState.value.contextualActionShelfIds.isNotEmpty()) {
+            _internalState.update { it.copy(contextualActionShelfIds = emptySet()) }
         }
     }
 
     fun deleteSelectedShelves() {
-        val shelvesToDelete =
-            _internalState.value.contextualActionShelfNames.filter { it != "Unshelved" }
+        val shelvesToDelete = _internalState.value.contextualActionShelfIds
         if (shelvesToDelete.isEmpty()) {
             clearShelfContextualAction()
             return
         }
 
-        Timber.d("Deleting ${shelvesToDelete.size} shelves: ${shelvesToDelete.joinToString()}")
-        val currentShelves =
-            prefs.getStringSet(KEY_SHELVES, emptySet())?.toMutableSet() ?: mutableSetOf()
-        val newTimestamp = System.currentTimeMillis()
-
-        prefs.edit {
-            shelvesToDelete.forEach { shelfName ->
-                currentShelves.remove(shelfName)
-                putBoolean("$KEY_SHELF_DELETED_PREFIX$shelfName", true)
-                putLong("$KEY_SHELF_TIMESTAMP_PREFIX$shelfName", newTimestamp)
+        viewModelScope.launch {
+            shelvesToDelete.forEach { shelfId ->
+                recentFilesRepository.deleteShelf(shelfId)
+                syncShelfChangeToFirestore(shelfId)
             }
-            putStringSet(KEY_SHELVES, currentShelves)
+            clearShelfContextualAction()
         }
-
-        shelvesToDelete.forEach { syncShelfChangeToFirestore(it) }
-
-        Timber.d("Shelves deleted successfully.")
-        clearShelfContextualAction()
     }
 
     fun showAddBooksToShelf() {
@@ -4197,29 +5165,28 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 booksSelectedForAdding = emptySet()
             )
         }
+        persistLibraryLandingState()
     }
 
-    private fun syncShelfChangeToFirestore(shelfName: String) {
+    private fun syncShelfChangeToFirestore(shelfId: String) {
         if (!uiState.value.isSyncEnabled) return
         val currentUser = uiState.value.currentUser ?: return
 
-        viewModelScope.launch {
-            val shelfContent =
-                prefs.getStringSet("$KEY_SHELF_CONTENT_PREFIX$shelfName", null)?.toList()
-                    ?: emptyList()
-            val isDeleted = prefs.getBoolean("$KEY_SHELF_DELETED_PREFIX$shelfName", false)
-            val timestamp = prefs.getLong("$KEY_SHELF_TIMESTAMP_PREFIX$shelfName", 0L)
+        viewModelScope.launch(Dispatchers.IO) {
+            val db = com.aryan.reader.data.AppDatabase.getDatabase(appContext)
+            val shelf = db.shelfDao().getShelfById(shelfId) ?: return@launch
+            val crossRefs = db.shelfDao().getCrossRefsForShelf(shelfId)
+            val bookIds = crossRefs.map { it.bookId }
 
             val shelfMetadata = ShelfMetadata(
-                name = shelfName,
-                bookIds = shelfContent,
-                isDeleted = isDeleted,
-                lastModifiedTimestamp = timestamp
+                name = shelf.name,
+                bookIds = bookIds,
+                isDeleted = shelf.isDeleted,
+                lastModifiedTimestamp = shelf.updatedAt
             )
 
             val deviceId = getInstallationId()
             firestoreRepository.syncShelf(currentUser.uid, shelfMetadata, deviceId)
-            Timber.d("Pushed shelf update to Firestore for: $shelfName")
         }
     }
 
@@ -4231,42 +5198,39 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 addBooksSource = AddBooksSource.UNSHELVED
             )
         }
+        persistLibraryLandingState()
     }
 
-    fun addBooksToShelf(shelfName: String) {
+    fun addBooksToShelf(shelfId: String) {
         val bookIdsToAdd = _internalState.value.booksSelectedForAdding
         if (bookIdsToAdd.isEmpty()) {
-            Timber.w("addBooksToShelf called for '$shelfName' but no books were selected.")
             dismissAddBooksToShelf()
             return
         }
-
-        Timber.i(
-            "Attempting to add ${bookIdsToAdd.size} books to shelf '$shelfName'. Book IDs: ${bookIdsToAdd.joinToString()}"
-        )
-        val key = "$KEY_SHELF_CONTENT_PREFIX$shelfName"
-        val currentBookIds = prefs.getStringSet(key, emptySet()) ?: emptySet()
-        Timber.d("Existing book IDs in shelf '$shelfName': ${currentBookIds.joinToString()}")
-
-        val newBookIds = currentBookIds + bookIdsToAdd
-        prefs.edit {
-            putStringSet(key, newBookIds)
-            putLong("$KEY_SHELF_TIMESTAMP_PREFIX$shelfName", System.currentTimeMillis())
-        }
-        Timber.i(
-            "Successfully updated shelf '$shelfName'. It now contains ${newBookIds.size} book(s)."
-        )
-
-        syncShelfChangeToFirestore(shelfName)
-
-        _internalState.update {
-            it.copy(isAddingBooksToShelf = false, booksSelectedForAdding = emptySet())
+        viewModelScope.launch {
+            recentFilesRepository.addBooksToShelf(shelfId, bookIdsToAdd.toList())
+            syncShelfChangeToFirestore(shelfId)
+            _internalState.update {
+                it.copy(isAddingBooksToShelf = false, booksSelectedForAdding = emptySet())
+            }
+            persistLibraryLandingState()
         }
     }
 
     fun setAddBooksSource(source: AddBooksSource) {
         _internalState.update { it.copy(addBooksSource = source) }
         prefs.edit { putString(KEY_ADD_BOOKS_SOURCE, source.name) }
+    }
+
+    private fun persistLibraryLandingState() {
+        val state = _internalState.value
+        val resolvedUiState = uiState.value
+        prefs.edit {
+            putInt(KEY_MAIN_SCREEN_START_PAGE, state.mainScreenStartPage)
+            putInt(KEY_LIBRARY_SCREEN_START_PAGE, state.libraryScreenStartPage)
+            putString(KEY_LAST_VIEWING_SHELF_ID, resolvedUiState.viewingShelfId)
+            putBoolean(KEY_LAST_ADDING_BOOKS_TO_SHELF, resolvedUiState.isAddingBooksToShelf)
+        }
     }
 
     fun toggleBookSelectionForAdding(bookId: String) {
@@ -4438,6 +5402,12 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         firestoreRepository.removeListener(feedbackListener)
         panelDetector?.close()
         panelDetector = null
+
+        speechBubbleDetector?.close()
+        speechBubbleDetector = null
+        speechBubbleCache.clear()
+        speechBubbleDetectionJobs.clear()
+
         Timber.d("ViewModel instance cleared (onCleared).")
     }
 
@@ -4753,6 +5723,77 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private suspend fun runSpeechBubbleDetection(
+        bitmap: Bitmap,
+        context: Context,
+        confidenceThreshold: Float = 0.1f
+    ): List<SpeechBubble> {
+        return withContext(mlDispatcher) {
+            try {
+                val detector = getOrInitSpeechBubbleDetector(context)
+                if (detector == null) {
+                    Timber.tag("BubbleZoom").w("ViewModel: Detector is null!")
+                    return@withContext emptyList()
+                }
+                detector.detectBubbles(bitmap, confidenceThreshold)
+            } catch (e: Exception) {
+                Timber.tag("BubbleZoom").e(e, "ViewModel: Error during speech bubble detection")
+                emptyList()
+            }
+        }
+    }
+
+    suspend fun detectSpeechBubbles(bitmap: Bitmap, context: Context): List<SpeechBubble> {
+        Timber.tag("BubbleZoom").d("ViewModel: detectSpeechBubbles called")
+        val bubbles = runSpeechBubbleDetection(bitmap, context)
+        Timber.tag("BubbleZoom").d("ViewModel: detectSpeechBubbles returning ${bubbles.size} bubbles")
+        return bubbles
+    }
+
+    suspend fun detectSpeechBubblesCached(
+        documentId: String,
+        pageIndex: Int,
+        bitmap: Bitmap,
+        context: Context
+    ): List<SpeechBubble> {
+        val key = SpeechBubbleCacheKey(documentId = documentId, pageIndex = pageIndex)
+
+        val cachedBeforeLock = speechBubbleCache[key]
+        if (cachedBeforeLock != null) {
+            return scaleCachedSpeechBubbles(cachedBeforeLock, bitmap.width, bitmap.height)
+        }
+
+        val detectionJob: Deferred<List<CachedSpeechBubble>>
+        speechBubbleCacheMutex.withLock {
+            val cachedInsideLock = speechBubbleCache[key]
+            if (cachedInsideLock != null) {
+                detectionJob = CompletableDeferred(cachedInsideLock)
+            } else {
+                detectionJob = speechBubbleDetectionJobs[key] ?: viewModelScope.async {
+                    val detected = runSpeechBubbleDetection(bitmap, context)
+                    val normalized = normalizeSpeechBubbles(detected, bitmap.width, bitmap.height)
+                    speechBubbleCache[key] = normalized
+                    normalized
+                }.also { job ->
+                    speechBubbleDetectionJobs[key] = job
+                }
+            }
+        }
+
+        val cached = try {
+            detectionJob.await()
+        } finally {
+            speechBubbleCacheMutex.withLock {
+                val activeJob = speechBubbleDetectionJobs[key]
+                if (activeJob === detectionJob && detectionJob.isCompleted) {
+                    speechBubbleDetectionJobs.remove(key)
+                }
+            }
+        }
+
+        return scaleCachedSpeechBubbles(cached, bitmap.width, bitmap.height)
+    }
+
     companion object {
         private const val KEY_SORT_ORDER = "sort_order"
         internal const val KEY_SHELVES = "shelf_names"
@@ -4774,6 +5815,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         private const val KEY_TABS_ENABLED = "tabs_enabled"
         private const val KEY_OPEN_TAB_IDS = "open_tab_ids"
         private const val KEY_ACTIVE_TAB = "active_tab_book_id"
+        private const val KEY_LAST_OPEN_BOOK_ID = "last_open_book_id"
+        private const val KEY_LAST_OPEN_FILE_TYPE = "last_open_file_type"
         private const val KEY_EXTERNAL_FILE_BEHAVIOR = "external_file_behavior"
         private const val KEY_USE_STRICT_FILE_FILTER = "use_strict_file_filter"
         private const val KEY_APP_THEME_MODE = "app_theme_mode"

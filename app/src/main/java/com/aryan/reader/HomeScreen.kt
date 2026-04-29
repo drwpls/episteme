@@ -339,12 +339,17 @@ fun HomeScreen(
                                 },
                                 onAppThemeClick = { showAppThemePanel = true },
                                 onTestPanelDetectionClick = { viewModel.testPanelDetection(context) },
-                                onLanguageClick = { showLanguageDialog = true }
+                                onTestSpeechBubbleDetectionClick = { viewModel.testSpeechBubbleDetection(context) },
+                                onLanguageClick = { showLanguageDialog = true },
+                                onExportLogsClick = { viewModel.exportLogsToFile(context) }
                             )
                         } else {
                             ContextualTopAppBar(
                                 selectedItemCount = selectedContextItems.size,
                                 onNavIconClick = { viewModel.clearContextualAction() },
+                                onTagClick = {
+                                    viewModel.openTagSelection(selectedContextItems.map { it.bookId }.toSet())
+                                },
                                 onInfoClick = {
                                     if (selectedContextItems.size == 1) {
                                         itemForInfoDialog = selectedContextItems.first()
@@ -472,7 +477,8 @@ fun HomeScreen(
                                 },
                                 onUpdateName = { newName ->
                                     viewModel.updateCustomName(item.bookId, newName)
-                                }
+                                },
+                                onOpenTags = { viewModel.openTagSelection(setOf(item.bookId)) }
                             )
                         }
                     }
@@ -988,7 +994,9 @@ fun DefaultTopAppBar(
     onStrictFilterToggleClick: () -> Unit,
     onAppThemeClick: () -> Unit,
     onTestPanelDetectionClick: () -> Unit,
-    onLanguageClick: () -> Unit
+    onTestSpeechBubbleDetectionClick: () -> Unit,
+    onLanguageClick: () -> Unit,
+    onExportLogsClick: () -> Unit
 ) {
     var showOptionsMenu by remember { mutableStateOf(false) }
     var showLimitMenu by remember { mutableStateOf(false) }
@@ -1092,6 +1100,16 @@ fun DefaultTopAppBar(
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text("Test Panel ML Detection") }, onClick = {
                         onTestPanelDetectionClick()
+                        showOptionsMenu = false
+                    })
+
+                    DropdownMenuItem(text = { Text("Test Speech Bubble ML Detection") }, onClick = {
+                        onTestSpeechBubbleDetectionClick()
+                        showOptionsMenu = false
+                    })
+
+                    DropdownMenuItem(text = { Text("Export Logs (Last 5000 lines)") }, onClick = {
+                        onExportLogsClick()
                         showOptionsMenu = false
                     })
                 }

@@ -24,17 +24,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,69 +32,88 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.drag
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
 import com.aryan.reader.R
 import com.aryan.reader.data.CustomFontEntity
 import java.io.File
-import androidx.compose.material3.Switch
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.res.stringResource
+import kotlin.math.roundToInt
 
 const val SETTINGS_PREFS_NAME = "epub_reader_settings"
 private const val TEXT_ALIGN_KEY = "reader_text_align"
 private const val FONT_SIZE_KEY = "reader_font_size"
 private const val LINE_HEIGHT_KEY = "reader_line_height"
 private const val PARAGRAPH_GAP_KEY = "reader_paragraph_gap"
+private const val IMAGE_SIZE_KEY = "reader_image_size"
 private const val AUTO_SCROLL_SPEED_KEY = "reader_auto_scroll_speed"
 private const val FONT_FAMILY_KEY = "reader_font_family"
 private const val TAP_TO_NAVIGATE_ENABLED_KEY = "tap_to_navigate_enabled"
@@ -116,6 +125,8 @@ private const val PULL_TO_TURN_ENABLED_KEY = "reader_pull_to_turn_enabled"
 const val DEFAULT_FONT_SIZE_VAL = 1.0f
 const val DEFAULT_LINE_HEIGHT_VAL = 1.0f
 const val DEFAULT_PARAGRAPH_GAP_VAL = 1.0f
+const val DEFAULT_IMAGE_SIZE_VAL = 1.0f
+const val DEFAULT_HORIZONTAL_MARGIN_VAL = 1.0f
 private const val TTS_SPEECH_RATE_KEY = "tts_speech_rate"
 private const val TTS_PITCH_KEY = "tts_pitch"
 
@@ -170,6 +181,8 @@ data class FormatSettings(
     val fontSize: Float,
     val lineHeight: Float,
     val paragraphGap: Float,
+    val imageSize: Float,
+    val horizontalMargin: Float,
     val font: ReaderFont,
     val customPath: String?,
     val textAlign: ReaderTextAlign
@@ -179,8 +192,11 @@ private const val FORMAT_IS_LOCAL_PREFIX = "format_is_local_"
 private const val LOCAL_FONT_SIZE_PREFIX = "local_font_size_"
 private const val LOCAL_LINE_HEIGHT_PREFIX = "local_line_height_"
 private const val LOCAL_PARAGRAPH_GAP_PREFIX = "local_paragraph_gap_"
+private const val LOCAL_IMAGE_SIZE_PREFIX = "local_image_size_"
+private const val LOCAL_HORIZONTAL_MARGIN_PREFIX = "local_horizontal_margin_"
 private const val LOCAL_FONT_FAMILY_PREFIX = "local_font_family_"
 private const val LOCAL_TEXT_ALIGN_PREFIX = "local_text_align_"
+private const val HORIZONTAL_MARGIN_KEY = "reader_horizontal_margin"
 
 fun loadFormatIsLocal(context: Context, bookId: String): Boolean {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
@@ -198,6 +214,8 @@ fun saveLocalReaderSettings(
     fontSize: Float,
     lineHeight: Float,
     paragraphGap: Float,
+    imageSize: Float,
+    horizontalMargin: Float,
     fontFamily: ReaderFont,
     customFontPath: String?,
     textAlign: ReaderTextAlign
@@ -207,6 +225,8 @@ fun saveLocalReaderSettings(
         putFloat(LOCAL_FONT_SIZE_PREFIX + bookId, fontSize)
         putFloat(LOCAL_LINE_HEIGHT_PREFIX + bookId, lineHeight)
         putFloat(LOCAL_PARAGRAPH_GAP_PREFIX + bookId, paragraphGap)
+        putFloat(LOCAL_IMAGE_SIZE_PREFIX + bookId, imageSize)
+        putFloat(LOCAL_HORIZONTAL_MARGIN_PREFIX + bookId, horizontalMargin)
         if (customFontPath != null) {
             putString(LOCAL_FONT_FAMILY_PREFIX + bookId, "custom|$customFontPath")
         } else {
@@ -260,6 +280,14 @@ fun loadPullToTurnMultiplier(context: Context): Float {
     return prefs.getFloat(PULL_TO_TURN_MULTIPLIER_KEY, 1.0f)
 }
 
+fun loadHorizontalMargin(context: Context): Float {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    if (prefs.contains(HORIZONTAL_MARGIN_KEY)) {
+        return prefs.getFloat(HORIZONTAL_MARGIN_KEY, DEFAULT_HORIZONTAL_MARGIN_VAL)
+    }
+    return if (loadRemoveEdgePadding(context)) 0f else DEFAULT_HORIZONTAL_MARGIN_VAL
+}
+
 fun loadFormatSettings(context: Context, bookId: String, isLocal: Boolean): FormatSettings {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -281,6 +309,18 @@ fun loadFormatSettings(context: Context, bookId: String, isLocal: Boolean): Form
         prefs.getFloat(PARAGRAPH_GAP_KEY, DEFAULT_PARAGRAPH_GAP_VAL)
     }
 
+    val imageSize = if (isLocal && prefs.contains(LOCAL_IMAGE_SIZE_PREFIX + bookId)) {
+        prefs.getFloat(LOCAL_IMAGE_SIZE_PREFIX + bookId, DEFAULT_IMAGE_SIZE_VAL)
+    } else {
+        prefs.getFloat(IMAGE_SIZE_KEY, DEFAULT_IMAGE_SIZE_VAL)
+    }
+
+    val horizontalMargin = if (isLocal && prefs.contains(LOCAL_HORIZONTAL_MARGIN_PREFIX + bookId)) {
+        prefs.getFloat(LOCAL_HORIZONTAL_MARGIN_PREFIX + bookId, DEFAULT_HORIZONTAL_MARGIN_VAL)
+    } else {
+        loadHorizontalMargin(context)
+    }
+
     val savedFontVal = if (isLocal && prefs.contains(LOCAL_FONT_FAMILY_PREFIX + bookId)) {
         prefs.getString(LOCAL_FONT_FAMILY_PREFIX + bookId, ReaderFont.ORIGINAL.id) ?: ReaderFont.ORIGINAL.id
     } else {
@@ -300,7 +340,16 @@ fun loadFormatSettings(context: Context, bookId: String, isLocal: Boolean): Form
     }
     val textAlign = ReaderTextAlign.entries.find { it.id == alignId } ?: ReaderTextAlign.DEFAULT
 
-    return FormatSettings(fontSize, lineHeight, paragraphGap, font, customPath, textAlign)
+    return FormatSettings(
+        fontSize = fontSize,
+        lineHeight = lineHeight,
+        paragraphGap = paragraphGap,
+        imageSize = imageSize,
+        horizontalMargin = horizontalMargin,
+        font = font,
+        customPath = customPath,
+        textAlign = textAlign
+    )
 }
 
 fun getComposeFontFamily(
@@ -339,6 +388,8 @@ fun saveReaderSettings(
     fontSize: Float,
     lineHeight: Float,
     paragraphGap: Float,
+    imageSize: Float,
+    horizontalMargin: Float,
     fontFamily: ReaderFont,
     customFontPath: String?,
     textAlign: ReaderTextAlign
@@ -348,6 +399,8 @@ fun saveReaderSettings(
         putFloat(FONT_SIZE_KEY, fontSize)
         putFloat(LINE_HEIGHT_KEY, lineHeight)
         putFloat(PARAGRAPH_GAP_KEY, paragraphGap)
+        putFloat(IMAGE_SIZE_KEY, imageSize)
+        putFloat(HORIZONTAL_MARGIN_KEY, horizontalMargin)
         if (customFontPath != null) {
             putString(FONT_FAMILY_KEY, "custom|$customFontPath")
         } else {
@@ -387,6 +440,7 @@ fun loadVolumeScrollSetting(context: Context): Boolean {
     return prefs.getBoolean(VOLUME_SCROLL_ENABLED_KEY, false)
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReaderTextFormatPanel(
     isVisible: Boolean,
@@ -394,8 +448,12 @@ fun ReaderTextFormatPanel(
     onFontSizeChange: (Float) -> Unit,
     currentLineHeight: Float,
     onLineHeightChange: (Float) -> Unit,
-    currentParagraphGap: Float, // NEW
-    onParagraphGapChange: (Float) -> Unit, // NEW
+    currentParagraphGap: Float,
+    onParagraphGapChange: (Float) -> Unit,
+    currentImageSize: Float,
+    onImageSizeChange: (Float) -> Unit,
+    currentHorizontalMargin: Float,
+    onHorizontalMarginChange: (Float) -> Unit,
     currentFont: ReaderFont,
     currentCustomFontName: String?,
     onFontOptionClick: () -> Unit,
@@ -404,27 +462,28 @@ fun ReaderTextFormatPanel(
     onReset: () -> Unit,
     isLocalMode: Boolean,
     onLocalModeToggle: (Boolean) -> Unit,
-    onClose: () -> Unit,
-    modifier: Modifier = Modifier
+    onClose: () -> Unit
 ) {
-    AnimatedVisibility(
-        visible = isVisible,
-        enter = slideInVertically { it } + fadeIn(),
-        exit = slideOutVertically { it } + fadeOut(),
-        modifier = modifier
-    ) {
-        Surface(
-            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.98f),
-            tonalElevation = 0.dp,
-            shadowElevation = 8.dp,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.8f)),
-            modifier = Modifier
-                .fillMaxWidth()
-                .animateContentSize()
+    if (isVisible) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+        ModalBottomSheet(
+            onDismissRequest = onClose,
+            sheetState = sheetState,
+            scrimColor = Color.Transparent,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.9f),
+            contentWindowInsets = { WindowInsets.navigationBars }
         ) {
+            val configuration = LocalConfiguration.current
+            val maxSheetHeight = (configuration.screenHeightDp * 0.7f).dp
+
             Column(
-                modifier = Modifier.padding(16.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = maxSheetHeight)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(bottom = 24.dp)
             ) {
                 // Header Row (Local/Global + Close/Reset)
                 Row(
@@ -500,7 +559,7 @@ fun ReaderTextFormatPanel(
                     modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
                 )
 
-                // Font Button (Full width)
+                // Font Button
                 Surface(
                     onClick = onFontOptionClick,
                     shape = RoundedCornerShape(12.dp),
@@ -540,7 +599,7 @@ fun ReaderTextFormatPanel(
 
                 Spacer(Modifier.height(8.dp))
 
-                // Alignment Button (Full width Segmented)
+                // Alignment Button (Segmented)
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant,
@@ -586,49 +645,61 @@ fun ReaderTextFormatPanel(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+                    modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
                 )
 
-                // Sliders
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    // Size
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(stringResource(R.string.label_font_size), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(40.dp))
-                        Slider(
-                            value = currentFontSize,
-                            onValueChange = onFontSizeChange,
-                            valueRange = 0.5f..3.0f,
-                            steps = 24,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(if (currentFontSize in 0.99f..1.01f) stringResource(R.string.label_original) else "%.1fx".format(currentFontSize), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(40.dp), textAlign = TextAlign.End)
-                    }
-                    // Lines
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(stringResource(R.string.label_line_height), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(40.dp))
-                        Slider(
-                            value = currentLineHeight,
-                            onValueChange = onLineHeightChange,
-                            valueRange = 1.0f..3.0f,
-                            steps = 19,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(if (currentLineHeight <= 1.01f) stringResource(R.string.label_original) else "%.1fx".format(currentLineHeight), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(40.dp), textAlign = TextAlign.End)
-                    }
-                    // Paragraph Gap
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(stringResource(R.string.label_paragraph_gap), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(40.dp))
-                        Slider(
-                            value = currentParagraphGap,
-                            onValueChange = onParagraphGapChange,
-                            valueRange = 0.0f..3.0f,
-                            steps = 29,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(if (currentParagraphGap in 0.99f..1.01f) stringResource(R.string.label_original) else "%.1fx".format(currentParagraphGap), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(40.dp), textAlign = TextAlign.End)
-                    }
+                // Resolve the string once outside the lambdas
+                val originalLabel = stringResource(R.string.label_original)
+                val noneLabel = stringResource(R.string.label_none)
+
+                // Wide, smooth sliders without dots
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FormatSlider(
+                        label = stringResource(R.string.label_font_size),
+                        value = currentFontSize,
+                        onValueChange = onFontSizeChange,
+                        valueRange = 0.5f..3.0f,
+                        formatValue = { if (it in 0.99f..1.01f) originalLabel else "%.1fx".format(it) }
+                    )
+
+                    FormatSlider(
+                        label = stringResource(R.string.label_line_height),
+                        value = currentLineHeight,
+                        onValueChange = onLineHeightChange,
+                        valueRange = 1.0f..3.0f,
+                        formatValue = { if (it <= 1.01f) originalLabel else "%.1fx".format(it) }
+                    )
+
+                    FormatSlider(
+                        label = stringResource(R.string.label_paragraph_gap),
+                        value = currentParagraphGap,
+                        onValueChange = onParagraphGapChange,
+                        valueRange = 0.0f..3.0f,
+                        formatValue = { if (it in 0.99f..1.01f) originalLabel else "%.1fx".format(it) }
+                    )
+
+                    FormatSlider(
+                        label = stringResource(R.string.label_image_size),
+                        value = currentImageSize,
+                        onValueChange = onImageSizeChange,
+                        valueRange = 0.5f..2.0f,
+                        formatValue = { if (it in 0.99f..1.01f) originalLabel else "%.1fx".format(it) }
+                    )
+
+                    FormatSlider(
+                        label = stringResource(R.string.label_horizontal_margin),
+                        value = currentHorizontalMargin,
+                        onValueChange = onHorizontalMarginChange,
+                        valueRange = 0.0f..3.0f,
+                        formatValue = {
+                            when {
+                                it <= 0.01f -> noneLabel
+                                it in 0.99f..1.01f -> originalLabel
+                                else -> "%.1fx".format(it)
+                            }
+                        }
+                    )
                 }
-                Spacer(Modifier.height(8.dp))
             }
         }
     }
@@ -761,8 +832,6 @@ fun VisualOptionsSheet(
     onPageInfoModeChange: (PageInfoMode) -> Unit,
     pullToTurnEnabled: Boolean,
     onPullToTurnChange: (Boolean) -> Unit,
-    removeEdgePadding: Boolean,
-    onRemoveEdgePaddingChange: (Boolean) -> Unit,
     pullToTurnMultiplier: Float,
     onPullToTurnMultiplierChange: (Float) -> Unit,
     onDismiss: () -> Unit
@@ -859,30 +928,6 @@ fun VisualOptionsSheet(
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onRemoveEdgePaddingChange(!removeEdgePadding) }
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(stringResource(R.string.visual_options_edge_padding), style = MaterialTheme.typography.titleMedium)
-                        Text(stringResource(R.string.visual_options_edge_padding_desc), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Switch(checked = removeEdgePadding, onCheckedChange = { onRemoveEdgePaddingChange(it) })
-                }
-            }
-
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
@@ -919,6 +964,140 @@ fun <T> OptionSegmentedControl(
                     color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun CustomCanvasSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+    modifier: Modifier = Modifier
+) {
+    val fraction = ((value - valueRange.start) / (valueRange.endInclusive - valueRange.start)).coerceIn(0f, 1f)
+    val activeColor = MaterialTheme.colorScheme.primary
+    val inactiveColor = MaterialTheme.colorScheme.surfaceVariant
+    val thumbColor = MaterialTheme.colorScheme.primary
+
+    Box(
+        modifier = modifier
+            .height(24.dp) // Keeps the touch target height slim
+            .pointerInput(valueRange) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    fun update(offset: Offset) {
+                        val newFraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        val rawValue = valueRange.start + newFraction * (valueRange.endInclusive - valueRange.start)
+                        // Snap to 0.1 intervals for consistent formatting
+                        onValueChange((rawValue * 10f).roundToInt() / 10f)
+                    }
+                    update(down.position)
+                    drag(down.id) { change ->
+                        change.consume()
+                        update(change.position)
+                    }
+                }
+            }
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val trackHeight = 4.dp.toPx()
+            val cornerRadius = CornerRadius(trackHeight / 2, trackHeight / 2)
+            val trackY = (size.height - trackHeight) / 2
+
+            // Draw Inactive Track
+            drawRoundRect(
+                color = inactiveColor,
+                topLeft = Offset(0f, trackY),
+                size = Size(size.width, trackHeight),
+                cornerRadius = cornerRadius
+            )
+
+            // Draw Active Track
+            val activeWidth = fraction * size.width
+            drawRoundRect(
+                color = activeColor,
+                topLeft = Offset(0f, trackY),
+                size = Size(activeWidth, trackHeight),
+                cornerRadius = cornerRadius
+            )
+
+            // Draw Thumb
+            val thumbRadius = 8.dp.toPx()
+            drawCircle(
+                color = thumbColor,
+                radius = thumbRadius,
+                center = Offset(
+                    x = activeWidth.coerceIn(thumbRadius, size.width - thumbRadius),
+                    y = size.height / 2
+                )
+            )
+        }
+    }
+}
+
+@Composable
+fun FormatSlider(
+    label: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+    stepSize: Float = 0.1f,
+    formatValue: (Float) -> String
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = formatValue(value),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            IconButton(
+                onClick = {
+                    val newValue = (value - stepSize).coerceAtLeast(valueRange.start)
+                    onValueChange((newValue * 10f).roundToInt() / 10f)
+                },
+                modifier = Modifier.size(32.dp) // Slimmer buttons
+            ) {
+                Icon(Icons.Default.Remove, contentDescription = "Decrease", tint = MaterialTheme.colorScheme.primary)
+            }
+
+            // Using our new CustomCanvasSlider here!
+            CustomCanvasSlider(
+                value = value,
+                onValueChange = onValueChange,
+                valueRange = valueRange,
+                modifier = Modifier.weight(1f)
+            )
+
+            IconButton(
+                onClick = {
+                    val newValue = (value + stepSize).coerceAtMost(valueRange.endInclusive)
+                    onValueChange((newValue * 10f).roundToInt() / 10f)
+                },
+                modifier = Modifier.size(32.dp) // Slimmer buttons
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Increase", tint = MaterialTheme.colorScheme.primary)
             }
         }
     }

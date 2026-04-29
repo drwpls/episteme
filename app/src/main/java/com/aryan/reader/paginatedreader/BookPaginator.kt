@@ -119,7 +119,8 @@ class BookPaginator(
     private val context: Context,
     private val mathMLRenderer: MathMLRenderer,
     private val userTextAlign: TextAlign?,
-    private val paragraphGapMultiplier: Float
+    private val paragraphGapMultiplier: Float,
+    private val imageSizeMultiplier: Float
 ) : IPaginator {
     override var totalPageCount by mutableIntStateOf(0)
         private set
@@ -267,7 +268,16 @@ class BookPaginator(
     }
 
     private fun generateConfigurationHash(): Int {
-        val configString = "w:${constraints.maxWidth}-h:${constraints.maxHeight}-fs:${textStyle.fontSize.value}-ta:$userTextAlign-pg:$paragraphGapMultiplier"
+        val configString = buildString {
+            append("w:${constraints.maxWidth}")
+            append("-h:${constraints.maxHeight}")
+            append("-fs:${textStyle.fontSize.value}")
+            append("-lh:${textStyle.lineHeight.value}")
+            append("-ff:${textStyle.fontFamily}")
+            append("-ta:$userTextAlign")
+            append("-pg:$paragraphGapMultiplier")
+            append("-img:$imageSizeMultiplier")
+        }
         val hash = configString.hashCode()
         return hash
     }
@@ -722,7 +732,8 @@ class BookPaginator(
             textMeasurer = textMeasurer,
             constraints = constraints,
             textStyle = textStyle,
-            density = density
+            density = density,
+            imageSizeMultiplier = imageSizeMultiplier
         )
         Timber.d("paginateChapter: Calling PaginatorLogic for chapter $chapterIndex.")
         val pages = paginate(
@@ -971,31 +982,7 @@ class BookPaginator(
                 return@launch
             }
 
-            val chapterPages = pageCache[targetChapterIndex] ?: paginateChapter(targetChapterIndex)
-            val chapterStartPage = calculateAccurateStartIndex(targetChapterIndex)
-
-            if (chapterPages == null) {
-                Timber.e("Href Navigation failed: Could not paginate target chapter $targetChapterIndex.")
-                return@launch
-            }
-
-            var targetPageInChapter = 0
-            if (anchor != null) {
-                Timber.d("Searching for anchor '$anchor' in chapter $targetChapterIndex.")
-                pageLoop@ for ((pageIndex, page) in chapterPages.withIndex()) {
-                    for (block in page.content) {
-                        if (block.elementId == anchor) {
-                            targetPageInChapter = pageIndex
-                            Timber.i("Found anchor '$anchor' on page $pageIndex in chapter $targetChapterIndex")
-                            break@pageLoop
-                        }
-                    }
-                }
-            }
-
-            val finalPageIndex = chapterStartPage + targetPageInChapter
-            Timber.i("Href navigation complete. Final page index: $finalPageIndex")
-            withContext(Dispatchers.Main) { onNavigationComplete(finalPageIndex) }
+            findPageForAnchor(targetChapterIndex, anchor, onNavigationComplete)
         }
     }
 

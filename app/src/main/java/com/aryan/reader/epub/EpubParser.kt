@@ -167,17 +167,14 @@ class EpubParser(private val context: Context) {
         bookId: String,
         shouldUseToc: Boolean = true,
         originalBookNameHint: String = "streamed_book",
-        parseContent: Boolean = true
+        parseContent: Boolean = true,
+        extractionDirOverride: File? = null
     ): EpubBook {
         return withContext(Dispatchers.IO) {
             Timber.d("Parsing EPUB input stream for bookId: $bookId")
 
-            val extractionDir = File(context.cacheDir, "imported_file_$bookId")
-
-            if (extractionDir.exists()) {
-                extractionDir.deleteRecursively()
-            }
-            extractionDir.mkdirs()
+            val extractionDir = extractionDirOverride?.let(ImportedFileCache::prepareDirectory)
+                ?: ImportedFileCache.prepareActiveBookDir(context, bookId)
 
             val tempFile = File.createTempFile("epub_stream", ".epub", context.cacheDir)
             val filesMap: Map<String, EpubFile>
@@ -244,6 +241,24 @@ class EpubParser(private val context: Context) {
         val metadataLanguage =
             document.metadata.selectFirstChildTag("dc:language")?.textContent ?: "en"
         val metadataCoverId = getMetadataCoverId(document.metadata)
+        val metadataDescription =
+            document.metadata.selectFirstChildTag("dc:description")?.textContent
+
+        Timber.d("EpubParser: Extracted OPF metadata: title='$metadataTitle', author='$metadataAuthor'")
+
+        var metadataSeriesName: String? = null
+        var metadataSeriesIndex: Double? = null
+
+        document.metadata.selectChildTag("meta")
+            .ifEmpty { document.metadata.selectChildTag("opf:meta") }
+            .forEach { meta ->
+                val nameAttr = meta.getAttributeValue("name")
+                val contentAttr = meta.getAttributeValue("content")
+
+                if (nameAttr == "calibre:series") metadataSeriesName = contentAttr
+                if (nameAttr == "calibre:series_index") metadataSeriesIndex = contentAttr?.toDoubleOrNull()
+            }
+
         val opfRelativePath = document.opfFilePath
         val opfParentDir = File(opfRelativePath).parentFile ?: File("")
         val manifestItems = getManifestItems(document.manifest, opfParentDir)
@@ -344,7 +359,10 @@ class EpubParser(private val context: Context) {
             pageList = pageTargets,
             tableOfContents = tableOfContents,
             extractionBasePath = extractionBasePath,
-            css = cssContent
+            css = cssContent,
+            seriesName = metadataSeriesName,
+            seriesIndex = metadataSeriesIndex,
+            description = metadataDescription
         )
     }
 
