@@ -26,5 +26,26 @@
     <string name="clear_selection">Limpar seleção</string>
     <string name="pin_unpin">Fixar/Desfixar</string>
     <string name="internal_storage">Armazenamento Interno</string>
-    <string name="clear_cloud_data_desc">Tem certeza de que deseja excluir permanentemente todos os seus dados de livro da nuvem? Isso também irá limpar sua biblioteca local para evitar a reinscrição. Esta ação não pode ser desfeita.</string>
+    <string name="clear_cloud_data_desc">Tem certeza de que deseja excluir permanentemente todos os dados dos seus livros da nuvem? Isso também apagará sua biblioteca local para evitar a sincronização. Esta ação não pode ser desfeita.</string>
+    <string name="info">Informações</string>
+    <string name="select_all">Selecionar Todos</string>
+    <string name="dialog_remove_from_recents">Remover dos Recentes</string>
+    <string name="dialog_warning_folder_sync_delete">Atenção: Alguns itens selecionados estão sincronizados com uma pasta local. Continuar excluirá os arquivos reais do armazenamento do dispositivo.\n\nEsta ação não pode ser desfeita.</string>
+    <string name="file_information">Informações de Arquivos</string>
+    <string name="book_name">Nome do Livro</string>
+    <string name="copy_name">Copiar Nome</string>
+    <string name="original_name">Nome Original: %1$s</string>
+    <string name="revert_to_original">Reverter para Original</string>
+    <string name="file_name">Nome do Arquivo: %1$s</string>
+    <string name="author">Autor</string>
+    <string name="format">Formato</string>
+    <string name="size">Tamanho</string>
+    <string name="added">Adicionado</string>
+    <string name="location">Localização</string>
+    <string name="source_opds">Fonte: OPDS Stream</string>
+    <string name="source_in_app">Armazenamento do Aplicativo</string>
+    <string name="about_title">Sobre o Episteme</string>
+    <string name="about_version">Versão: %1$s (Build: %2$d)</string>
+    <string name="empty_select_file">Selecione um arquivo</string>
+    <string name="clear_cloud_data_title">Limpar Todos os Dados Sincronizados?</string>
 </resources>
