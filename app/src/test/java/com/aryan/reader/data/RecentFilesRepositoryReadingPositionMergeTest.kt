@@ -14,7 +14,9 @@ import io.mockk.unmockkObject
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import java.io.File
@@ -113,14 +115,82 @@ class RecentFilesRepositoryReadingPositionMergeTest {
         assertEquals(82f, inserted.captured.progressPercentage)
     }
 
-    private fun existingEntity(): RecentFileEntity {
+    @Test
+    fun `addRecentFile keeps edited embedded epub metadata when cached parser returns original metadata`() = runTest {
+        val inserted = slot<RecentFileEntity>()
+        coEvery { recentFileDao.getFileByBookId("book-1") } returns existingEntity().copy(
+            author = "Edited Author",
+            originalAuthor = "Author",
+            fileContentModifiedTimestamp = 5_000L
+        )
+        coEvery { recentFileDao.insertOrUpdateFile(capture(inserted)) } just Runs
+
+        repository.addRecentFile(
+            RecentFileItem(
+                bookId = "book-1",
+                uriString = "content://new",
+                type = FileType.EPUB,
+                displayName = "New.epub",
+                timestamp = 2_000L,
+                title = "Old",
+                author = "Author",
+                fileContentModifiedTimestamp = 5_000L,
+                isRecent = true
+            )
+        )
+
+        assertEquals("Edited Author", inserted.captured.author)
+        assertEquals("Author", inserted.captured.originalAuthor)
+    }
+
+    @Test
+    fun `addRecentFile clears extracted metadata when folder file size changes`() = runTest {
+        val inserted = slot<RecentFileEntity>()
+        coEvery { recentFileDao.getFileByBookId("book-1") } returns existingEntity(
+            fileSize = 123L,
+            folderTextMetadataParsed = true,
+            folderCoverMetadataParsed = true,
+            coverImagePath = "/covers/old.png"
+        )
+        coEvery { recentFileDao.insertOrUpdateFile(capture(inserted)) } just Runs
+
+        repository.addRecentFile(
+            RecentFileItem(
+                bookId = "book-1",
+                uriString = "content://new",
+                type = FileType.EPUB,
+                displayName = "New.epub",
+                timestamp = 2_000L,
+                sourceFolderUri = "content://folder",
+                fileSize = 456L,
+                isRecent = true
+            )
+        )
+
+        assertEquals(456L, inserted.captured.fileSize)
+        assertNull(inserted.captured.coverImagePath)
+        assertEquals("New", inserted.captured.title)
+        assertNull(inserted.captured.author)
+        assertNull(inserted.captured.seriesName)
+        assertNull(inserted.captured.description)
+        assertNull(inserted.captured.originalTitle)
+        assertFalse(inserted.captured.folderTextMetadataParsed)
+        assertFalse(inserted.captured.folderCoverMetadataParsed)
+    }
+
+    private fun existingEntity(
+        fileSize: Long = 123L,
+        folderTextMetadataParsed: Boolean = true,
+        folderCoverMetadataParsed: Boolean = false,
+        coverImagePath: String? = "/covers/old.png"
+    ): RecentFileEntity {
         return RecentFileEntity(
             bookId = "book-1",
             uriString = "content://old",
             type = FileType.EPUB,
             displayName = "Old.epub",
             timestamp = 1_000L,
-            coverImagePath = "/covers/old.png",
+            coverImagePath = coverImagePath,
             title = "Old",
             author = "Author",
             lastChapterIndex = 6,
@@ -138,11 +208,12 @@ class RecentFilesRepositoryReadingPositionMergeTest {
             isReflowPreferred = false,
             customName = "Custom",
             highlights = "highlights",
-            fileSize = 123L,
+            fileSize = fileSize,
             seriesName = "Series",
             seriesIndex = 1.0,
             description = "Description",
-            folderTextMetadataParsed = true
+            folderTextMetadataParsed = folderTextMetadataParsed,
+            folderCoverMetadataParsed = folderCoverMetadataParsed
         )
     }
 }

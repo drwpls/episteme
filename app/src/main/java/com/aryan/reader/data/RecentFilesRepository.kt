@@ -22,9 +22,12 @@ package com.aryan.reader.data
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.core.net.toUri
+import com.aryan.reader.FileType
 import com.aryan.reader.ReaderPerfLog
+import com.aryan.reader.scaledToCanvasLimit
 import timber.log.Timber
 import com.aryan.reader.BookImporter
 import com.aryan.reader.paginatedreader.Locator
@@ -40,7 +43,6 @@ import java.io.FileOutputStream
 import com.aryan.reader.pdf.data.PdfAnnotationRepository
 import com.aryan.reader.pdf.data.PageLayoutRepository
 import com.aryan.reader.pdf.data.PdfTextBoxRepository
-import com.aryan.reader.shared.pdf.SHARED_PDF_RICH_TEXT_LOG_TAG
 import com.aryan.reader.shared.pdf.SharedPdfAnnotationSidecarCodec
 import org.json.JSONObject
 import org.json.JSONArray
@@ -48,6 +50,9 @@ import java.util.UUID
 import androidx.core.content.edit
 
 private const val COVER_CACHE_DIR = "cover_cache"
+private const val DIRECT_EMBEDDED_COVER_MAX_BYTES = 8L * 1024L * 1024L
+private const val EMBEDDED_COVER_MAX_DIMENSION = 1200
+private val EMBEDDED_COVER_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
 
 class RecentFilesRepository(private val context: Context) {
 
@@ -169,12 +174,43 @@ class RecentFilesRepository(private val context: Context) {
         }
 
         val entityToInsert = if (existingItem != null) {
+            val folderFileChanged = item.sourceFolderUri != null &&
+                existingItem.sourceFolderUri == item.sourceFolderUri &&
+                ((item.fileSize > 0L && item.fileSize != existingItem.fileSize) ||
+                    (item.fileContentModifiedTimestamp > 0L &&
+                        item.fileContentModifiedTimestamp != existingItem.fileContentModifiedTimestamp))
+            val embeddedMetadataFileChanged =
+                (item.fileSize > 0L && existingItem.fileSize > 0L && item.fileSize != existingItem.fileSize) ||
+                    (item.fileContentModifiedTimestamp > 0L &&
+                        existingItem.fileContentModifiedTimestamp > 0L &&
+                        item.fileContentModifiedTimestamp != existingItem.fileContentModifiedTimestamp)
+            val keepExistingEmbeddedMetadata = item.type == FileType.EPUB &&
+                existingItem.type == FileType.EPUB &&
+                !embeddedMetadataFileChanged &&
+                existingItem.hasEmbeddedMetadataChanges()
+
             item.toRecentFileEntity().copy(
                 uriString = existingItem.uriString ?: item.uriString,
                 isAvailable = existingItem.isAvailable || item.isAvailable,
-                coverImagePath = item.coverImagePath ?: existingItem.coverImagePath,
-                title = item.title ?: existingItem.title,
-                author = item.author ?: existingItem.author,
+                coverImagePath = if (folderFileChanged) {
+                    item.coverImagePath
+                } else {
+                    item.coverImagePath ?: existingItem.coverImagePath
+                },
+                title = if (folderFileChanged) {
+                    item.title ?: item.displayName.substringBeforeLast('.', item.displayName)
+                } else if (keepExistingEmbeddedMetadata) {
+                    existingItem.title
+                } else {
+                    item.title ?: existingItem.title
+                },
+                author = if (folderFileChanged) {
+                    item.author
+                } else if (keepExistingEmbeddedMetadata) {
+                    existingItem.author
+                } else {
+                    item.author ?: existingItem.author
+                },
                 lastChapterIndex = item.lastChapterIndex ?: existingItem.lastChapterIndex,
                 lastPage = item.lastPage ?: existingItem.lastPage,
                 lastPositionCfi = item.lastPositionCfi ?: existingItem.lastPositionCfi,
@@ -187,10 +223,43 @@ class RecentFilesRepository(private val context: Context) {
                 sourceFolderUri = item.sourceFolderUri ?: existingItem.sourceFolderUri,
                 highlights = item.highlightsJson ?: existingItem.highlights,
                 fileSize = if (item.fileSize > 0) item.fileSize else existingItem.fileSize,
-                seriesName = item.seriesName ?: existingItem.seriesName,
-                seriesIndex = item.seriesIndex ?: existingItem.seriesIndex,
-                description = item.description ?: existingItem.description,
-                folderTextMetadataParsed = item.folderTextMetadataParsed || existingItem.folderTextMetadataParsed
+                fileContentModifiedTimestamp = if (item.fileContentModifiedTimestamp > 0) item.fileContentModifiedTimestamp else existingItem.fileContentModifiedTimestamp,
+                seriesName = if (folderFileChanged) {
+                    item.seriesName
+                } else if (keepExistingEmbeddedMetadata) {
+                    existingItem.seriesName
+                } else {
+                    item.seriesName ?: existingItem.seriesName
+                },
+                seriesIndex = if (folderFileChanged) {
+                    item.seriesIndex
+                } else if (keepExistingEmbeddedMetadata) {
+                    existingItem.seriesIndex
+                } else {
+                    item.seriesIndex ?: existingItem.seriesIndex
+                },
+                description = if (folderFileChanged) {
+                    item.description
+                } else if (keepExistingEmbeddedMetadata) {
+                    existingItem.description
+                } else {
+                    item.description ?: existingItem.description
+                },
+                originalTitle = if (folderFileChanged) item.originalTitle ?: item.title else existingItem.originalTitle ?: item.originalTitle ?: item.title,
+                originalAuthor = if (folderFileChanged) item.originalAuthor ?: item.author else existingItem.originalAuthor ?: item.originalAuthor ?: item.author,
+                originalSeriesName = if (folderFileChanged) item.originalSeriesName ?: item.seriesName else existingItem.originalSeriesName ?: item.originalSeriesName ?: item.seriesName,
+                originalSeriesIndex = if (folderFileChanged) item.originalSeriesIndex ?: item.seriesIndex else existingItem.originalSeriesIndex ?: item.originalSeriesIndex ?: item.seriesIndex,
+                originalDescription = if (folderFileChanged) item.originalDescription ?: item.description else existingItem.originalDescription ?: item.originalDescription ?: item.description,
+                folderTextMetadataParsed = if (folderFileChanged) {
+                    item.folderTextMetadataParsed
+                } else {
+                    item.folderTextMetadataParsed || existingItem.folderTextMetadataParsed
+                },
+                folderCoverMetadataParsed = if (folderFileChanged) {
+                    item.folderCoverMetadataParsed
+                } else {
+                    item.folderCoverMetadataParsed || existingItem.folderCoverMetadataParsed
+                }
             )
         } else {
             item.toRecentFileEntity()
@@ -201,13 +270,60 @@ class RecentFilesRepository(private val context: Context) {
         Timber.d("Added/Updated recent file in DB: ${item.displayName}")
     }
 
+    private fun RecentFileEntity.hasEmbeddedMetadataChanges(): Boolean {
+        val hasOriginalMetadata = listOf(originalTitle, originalAuthor, originalSeriesName, originalDescription)
+            .any { !it.isNullOrBlank() } || originalSeriesIndex != null
+        return (hasOriginalMetadata && (
+            metadataValueChanged(title, originalTitle) ||
+                metadataValueChanged(author, originalAuthor) ||
+                metadataValueChanged(seriesName, originalSeriesName) ||
+                seriesIndex != originalSeriesIndex ||
+                metadataValueChanged(description, originalDescription)
+            ))
+    }
+
+    private fun metadataValueChanged(current: String?, original: String?): Boolean {
+        return current.orEmpty().trim() != original.orEmpty().trim()
+    }
+
+    suspend fun updateUserEditableMetadata(
+        bookId: String,
+        metadata: BookMetadataEdit,
+        fileSize: Long = 0L,
+        fileContentModifiedTimestamp: Long = 0L
+    ) = withContext(Dispatchers.IO) {
+        val currentTime = System.currentTimeMillis()
+        recentFileDao.updateUserEditableMetadata(
+            bookId = bookId,
+            title = metadata.title,
+            author = metadata.author,
+            seriesName = metadata.seriesName,
+            seriesIndex = metadata.seriesIndex,
+            description = metadata.description,
+            fileSize = fileSize,
+            fileContentModifiedTimestamp = fileContentModifiedTimestamp,
+            timestamp = currentTime
+        )
+        Timber.d("Updated user-editable metadata for $bookId")
+    }
+
+    suspend fun restoreOriginalMetadata(
+        bookId: String,
+        fileSize: Long = 0L,
+        fileContentModifiedTimestamp: Long = 0L
+    ) = withContext(Dispatchers.IO) {
+        val currentTime = System.currentTimeMillis()
+        recentFileDao.restoreOriginalMetadata(bookId, fileSize, fileContentModifiedTimestamp, currentTime)
+        Timber.d("Restored original metadata for $bookId")
+    }
+
     suspend fun updateHighlights(bookId: String, highlightsJson: String) = withContext(Dispatchers.IO) {
         val currentTime = System.currentTimeMillis()
         recentFileDao.updateHighlights(bookId, highlightsJson, currentTime)
         Timber.d("Updated highlights for $bookId")
     }
 
-    suspend fun syncLocalMetadataToFolder(bookId: String) = withContext(Dispatchers.IO) {
+    suspend fun syncLocalMetadataToFolder(bookId: String, force: Boolean = false) = withContext(Dispatchers.IO) {
         val entity = recentFileDao.getFileByBookId(bookId) ?: return@withContext
         val folderUriString = entity.sourceFolderUri
 
@@ -217,7 +333,7 @@ class RecentFilesRepository(private val context: Context) {
             val hasHighlights = !entity.highlights.isNullOrEmpty() && entity.highlights != "[]"
             val isDirty = entity.isRecent || hasProgress || hasBookmarks || hasHighlights
 
-            if (!isDirty) {
+            if (!force && !isDirty) {
                 Timber.d("SyncDebug: Book $bookId is 'Clean' (Unread/Not Recent). Skipping JSON creation.")
                 return@withContext
             }
@@ -240,7 +356,15 @@ class RecentFilesRepository(private val context: Context) {
                 locatorBlockIndex = entity.locatorBlockIndex,
                 locatorCharOffset = entity.locatorCharOffset,
                 customName = entity.customName,
-                highlightsJson = entity.highlights
+                highlightsJson = entity.highlights,
+                seriesName = entity.seriesName,
+                seriesIndex = entity.seriesIndex,
+                description = entity.description,
+                originalTitle = entity.originalTitle,
+                originalAuthor = entity.originalAuthor,
+                originalSeriesName = entity.originalSeriesName,
+                originalSeriesIndex = entity.originalSeriesIndex,
+                originalDescription = entity.originalDescription
             )
 
             LocalSyncUtils.saveMetadataToFolder(
@@ -275,7 +399,7 @@ class RecentFilesRepository(private val context: Context) {
         val hasHighlights = highlightFile.exists()
 
         Timber.tag("FolderAnnotationSync").d("File checks -> hasInk: $hasInk, hasRichText: $hasRichText, hasLayout: $hasLayout, hasTextBoxes: $hasTextBoxes, hasHighlights: $hasHighlights")
-        Timber.tag(SHARED_PDF_RICH_TEXT_LOG_TAG).d(
+        Timber.d(
             "android.folder.export candidates book=$bookId hasRichText=$hasRichText " +
                 "richBytes=${if (hasRichText) richTextFile.length() else 0L} folder=$folderUriString"
         )
@@ -291,7 +415,7 @@ class RecentFilesRepository(private val context: Context) {
             try {
                 val content = file.readText().trim()
                 if (key == "text") {
-                    Timber.tag(SHARED_PDF_RICH_TEXT_LOG_TAG).d(
+                    Timber.d(
                         "android.folder.export.readRichText book=$bookId rawLen=${content.length} file=${file.absolutePath}"
                     )
                 }
@@ -302,7 +426,7 @@ class RecentFilesRepository(private val context: Context) {
                 }
             } catch (e: Exception) {
                 if (key == "text") {
-                    Timber.tag(SHARED_PDF_RICH_TEXT_LOG_TAG)
+                    Timber
                         .e(e, "android.folder.export.richTextParseFailed book=$bookId")
                 }
                 Timber.tag("FolderAnnotationSync").e(e, "Error parsing $key file")
@@ -328,7 +452,7 @@ class RecentFilesRepository(private val context: Context) {
 
         val canonicalBundleJson = SharedPdfAnnotationSidecarCodec.canonicalizeDataJson(bundleJson.toString())
         if (hasRichText) {
-            Timber.tag(SHARED_PDF_RICH_TEXT_LOG_TAG).d(
+            Timber.d(
                 "android.folder.export.saveSidecar book=$bookId timestamp=$finalTs canonicalLen=${canonicalBundleJson.length}"
             )
         }
@@ -348,7 +472,7 @@ class RecentFilesRepository(private val context: Context) {
             val bundle = JSONObject(
                 SharedPdfAnnotationSidecarCodec.legacyAndroidDataJsonFromCanonical(jsonString)
             )
-            Timber.tag(SHARED_PDF_RICH_TEXT_LOG_TAG).d(
+            Timber.d(
                 "android.folder.import.bundle book=$bookId rawLen=${jsonString.length} " +
                     "hasRichText=${bundle.has("text")} keys=${bundle.keys().asSequence().toList()}"
             )
@@ -359,7 +483,7 @@ class RecentFilesRepository(private val context: Context) {
                     val contentStr = bundle.get(key).toString()
                     file.writeText(contentStr)
                     if (key == "text") {
-                        Timber.tag(SHARED_PDF_RICH_TEXT_LOG_TAG).d(
+                        Timber.d(
                             "android.folder.import.writeRichText book=$bookId rawLen=${contentStr.length} file=${file.absolutePath}"
                         )
                     }
@@ -431,11 +555,15 @@ class RecentFilesRepository(private val context: Context) {
         }
     }
 
-    suspend fun getFolderBooksNeedingTextMetadata(sourceFolderUri: String? = null): List<RecentFileItem> = withContext(Dispatchers.IO) {
+    suspend fun getFolderBooksNeedingTextMetadata(
+        sourceFolderUri: String? = null,
+        limit: Int = Int.MAX_VALUE
+    ): List<RecentFileItem> = withContext(Dispatchers.IO) {
+        val queryLimit = limit.coerceAtLeast(1)
         val entities = if (sourceFolderUri.isNullOrBlank()) {
-            recentFileDao.getFolderBooksNeedingTextMetadata()
+            recentFileDao.getFolderBooksNeedingTextMetadata(queryLimit)
         } else {
-            recentFileDao.getFolderBooksNeedingTextMetadata(sourceFolderUri)
+            recentFileDao.getFolderBooksNeedingTextMetadata(sourceFolderUri, queryLimit)
         }
         return@withContext entities.map { it.toRecentFileItem() }
     }
@@ -459,7 +587,13 @@ class RecentFilesRepository(private val context: Context) {
                         coverImagePath = item.coverImagePath,
                         title = item.title,
                         author = item.author,
-                        fileSize = item.fileSize
+                        seriesName = item.seriesName,
+                        seriesIndex = item.seriesIndex,
+                        description = item.description,
+                        fileSize = item.fileSize,
+                        fileContentModifiedTimestamp = item.fileContentModifiedTimestamp,
+                        textMetadataParsed = item.folderTextMetadataParsed,
+                        coverMetadataParsed = item.folderCoverMetadataParsed
                     )
                 }
             }
@@ -562,9 +696,17 @@ class RecentFilesRepository(private val context: Context) {
         val filename = "cover_${uri.toString().hashCode()}.png"
         val file = File(cacheDir, filename)
         var fos: FileOutputStream? = null
+        var scaledCopy: Bitmap? = null
         try {
+            deleteCoverCacheVariants(uri)
+            val bitmapToSave = bitmap.scaledToCanvasLimit(
+                maxBytes = 8L * 1024L * 1024L,
+                maxDimension = EMBEDDED_COVER_MAX_DIMENSION
+            ).also {
+                if (it !== bitmap) scaledCopy = it
+            }
             fos = FileOutputStream(file)
-            bitmap.compress(Bitmap.CompressFormat.PNG, 90, fos)
+            bitmapToSave.compress(Bitmap.CompressFormat.PNG, 90, fos)
             Timber.d("Saved cover image to: ${file.absolutePath}")
             return@withContext file.absolutePath
         } catch (e: Exception) {
@@ -573,7 +715,68 @@ class RecentFilesRepository(private val context: Context) {
             return@withContext null
         } finally {
             fos?.close()
+            scaledCopy?.recycle()
         }
+    }
+
+    suspend fun saveEmbeddedCoverToCache(bytes: ByteArray, uri: Uri, extension: String): String? = withContext(Dispatchers.IO) {
+        if (bytes.isEmpty()) return@withContext null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@withContext null
+
+        val safeExtension = extension.lowercase().takeIf { it in EMBEDDED_COVER_EXTENSIONS } ?: "png"
+        if (
+            bytes.size.toLong() <= DIRECT_EMBEDDED_COVER_MAX_BYTES &&
+            bounds.outWidth <= EMBEDDED_COVER_MAX_DIMENSION &&
+            bounds.outHeight <= EMBEDDED_COVER_MAX_DIMENSION
+        ) {
+            return@withContext saveEmbeddedCoverBytesToCache(bytes, uri, safeExtension)
+        }
+
+        var sampleSize = 1
+        while (
+            (bounds.outWidth / sampleSize) > EMBEDDED_COVER_MAX_DIMENSION ||
+            (bounds.outHeight / sampleSize) > EMBEDDED_COVER_MAX_DIMENSION
+        ) {
+            sampleSize *= 2
+        }
+
+        val decoded = BitmapFactory.decodeByteArray(
+            bytes,
+            0,
+            bytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        ) ?: return@withContext null
+
+        try {
+            return@withContext saveCoverToCache(decoded, uri)
+        } finally {
+            decoded.recycle()
+        }
+    }
+
+    private fun saveEmbeddedCoverBytesToCache(bytes: ByteArray, uri: Uri, extension: String): String? {
+        val cacheDir = getCoverCacheDirInternal()
+        val filename = "cover_${uri.toString().hashCode()}.$extension"
+        val file = File(cacheDir, filename)
+        return try {
+            deleteCoverCacheVariants(uri)
+            FileOutputStream(file).use { output -> output.write(bytes) }
+            Timber.d("Saved embedded cover image to: ${file.absolutePath}")
+            file.absolutePath
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to save embedded cover image to cache for $uri")
+            file.delete()
+            null
+        }
+    }
+
+    private fun deleteCoverCacheVariants(uri: Uri) {
+        val prefix = "cover_${uri.toString().hashCode()}."
+        getCoverCacheDirInternal().listFiles()
+            ?.filter { it.isFile && it.name.startsWith(prefix) }
+            ?.forEach { runCatching { it.delete() } }
     }
 
     private fun deleteCachedCover(filePath: String): Boolean {
@@ -622,10 +825,11 @@ class RecentFilesRepository(private val context: Context) {
 
     suspend fun clearLocalCachesForBook(bookId: String) = withContext(Dispatchers.IO) {
         try {
+            recentFileDao.getFileByBookId(bookId)?.coverImagePath?.let { deleteCachedCover(it) }
             pdfRichTextRepository.getFileForSync(bookId).delete()
             pageLayoutRepository.getLayoutFile(bookId).delete()
             ImportedFileCache.clearBookCache(context, bookId)
-            Timber.d("Cleared layout and text caches for modified book: $bookId")
+            Timber.d("Cleared local caches for modified book: $bookId")
         } catch (e: Exception) {
             Timber.e(e, "Error clearing caches for $bookId")
         }

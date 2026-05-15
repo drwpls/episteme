@@ -53,9 +53,15 @@ private data class DesktopTtsSequenceChunk(
 
 class DesktopGeminiCloudTtsAdapter(
     private val settingsProvider: () -> ReaderAiByokSettings,
-    private val httpClient: HttpClient = HttpClient.newHttpClient(),
+    private val networkAccess: () -> Boolean = { true },
+    httpClient: HttpClient? = null,
     private val cacheManager: ReaderTtsFileCacheManager = ReaderTtsFileCacheManager(defaultDesktopTtsCacheRoot())
 ) : TtsAdapter {
+    private val providedHttpClient = httpClient
+    private val httpClient: HttpClient by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        providedHttpClient ?: HttpClient.newHttpClient()
+    }
+
     @Volatile
     private var activeLine: SourceDataLine? = null
 
@@ -66,7 +72,7 @@ class DesktopGeminiCloudTtsAdapter(
     private var activePlayer: DesktopStreamingPcmPlayer? = null
 
     override val isAvailable: Boolean
-        get() = settingsProvider().sanitized().isCloudTtsAvailable
+        get() = networkAccess() && settingsProvider().sanitized().isCloudTtsAvailable
 
     override suspend fun speak(text: String) {
         val trimmed = text.trim()
@@ -171,6 +177,10 @@ class DesktopGeminiCloudTtsAdapter(
                 "ttsModel=\"${settings.ttsModel.desktopTtsPreview()}\" speaker=\"${settings.ttsSpeakerId.desktopTtsPreview()}\" " +
                 "available=${settings.isCloudTtsAvailable}"
         )
+        if (!networkAccess()) {
+            logDesktopTts("stream_blocked reason=network_disabled")
+            throw IllegalStateException("Cloud TTS is unavailable in this desktop build.")
+        }
         if (!settings.isCloudTtsAvailable) {
             logDesktopTts("stream_blocked reason=not_available")
             throw IllegalStateException("Cloud TTS needs a saved Gemini key and the Gemini cloud TTS model selected.")
@@ -447,9 +457,7 @@ private suspend fun playCachedWav(file: File, player: DesktopStreamingPcmPlayer)
 }
 
 private fun defaultDesktopTtsCacheRoot(): File {
-    val baseDir = System.getenv("APPDATA")?.takeIf { it.isNotBlank() }
-        ?: File(System.getProperty("user.home"), "AppData/Roaming").absolutePath
-    return File(baseDir, "Episteme/TTS_Cache")
+    return File(desktopUserCacheRoot(), "TTS_Cache")
 }
 
 private fun buildGeminiTtsSetup(speakerId: String): String {

@@ -31,7 +31,15 @@ class FolderBookMetadataTest {
 
         val decoded = FolderBookMetadata.fromJsonString(metadata.toJsonString())
 
-        assertEquals(metadata.copy(author = null, lastPage = null, locatorCharOffset = null), decoded)
+        assertEquals(
+            metadata.copy(
+                title = null,
+                author = null,
+                lastPage = null,
+                locatorCharOffset = null
+            ),
+            decoded
+        )
     }
 
     @Test
@@ -78,13 +86,43 @@ class FolderBookMetadataTest {
 
         assertEquals("book-2", item.bookId)
         assertEquals(FileType.EPUB, item.type)
-        assertEquals("Remote Title", item.title)
-        assertEquals("Author", item.author)
+        assertEquals("Remote", item.title)
+        assertNull(item.author)
         assertEquals(12, item.lastPage)
         assertEquals(7, item.locatorBlockIndex)
         assertEquals(8, item.locatorCharOffset)
         assertEquals("content://folder", item.sourceFolderUri)
         assertEquals("Shelf Name", item.customName)
         assertEquals("highlights", item.highlightsJson)
+    }
+
+    @Test
+    fun `toRecentFileItem preserves explicit unknown file type`() {
+        val metadata = FolderBookMetadata(
+            bookId = "book-3",
+            title = null,
+            author = null,
+            displayName = "Remote.bin",
+            type = "UNKNOWN",
+            lastChapterIndex = null,
+            lastPage = null,
+            lastPositionCfi = null,
+            progressPercentage = 0f,
+            isRecent = false,
+            lastModifiedTimestamp = 500L,
+            bookmarksJson = null,
+            locatorBlockIndex = null,
+            locatorCharOffset = null,
+            customName = null,
+            highlightsJson = null
+        )
+
+        val item = metadata.toRecentFileItem(
+            uriString = "content://book",
+            coverPath = null,
+            sourceFolderUri = "content://folder"
+        )
+
+        assertEquals(FileType.UNKNOWN, item.type)
     }
 }

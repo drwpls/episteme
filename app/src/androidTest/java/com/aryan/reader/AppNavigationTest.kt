@@ -79,6 +79,19 @@ class AppNavigationTest {
     }
 
     @Test
+    fun appNavigation_whenPptxSelected_navigatesToPdfViewer() {
+        fakeUiState.value = ReaderScreenState(
+            selectedFileType = FileType.PPTX,
+            selectedPdfUri = Uri.parse("content://dummy.pptx")
+        )
+
+        composeTestRule.waitForIdle()
+
+        val currentRoute = navController.currentBackStackEntry?.destination?.route
+        assertEquals(AppDestinations.PDF_VIEWER_ROUTE, currentRoute)
+    }
+
+    @Test
     fun appNavigation_whenEpubSelected_navigatesToEpubReader() {
         // Trigger state change
         fakeUiState.value = ReaderScreenState(
@@ -114,5 +127,20 @@ class AppNavigationTest {
 
         val currentRoute = navController.currentBackStackEntry?.destination?.route
         assertEquals(AppDestinations.MAIN_ROUTE, currentRoute)
+    }
+
+    @Test
+    fun appNavigation_whenUnknownFileTypeSelected_navigatesBackToMain() {
+        fakeUiState.value = ReaderScreenState(
+            selectedFileType = FileType.PDF,
+            selectedPdfUri = Uri.parse("content://dummy.pdf")
+        )
+        composeTestRule.waitForIdle()
+        assertEquals(AppDestinations.PDF_VIEWER_ROUTE, navController.currentBackStackEntry?.destination?.route)
+
+        fakeUiState.value = ReaderScreenState(selectedFileType = FileType.UNKNOWN)
+        composeTestRule.waitForIdle()
+
+        assertEquals(AppDestinations.MAIN_ROUTE, navController.currentBackStackEntry?.destination?.route)
     }
 }

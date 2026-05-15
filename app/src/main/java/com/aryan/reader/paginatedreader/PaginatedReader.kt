@@ -56,6 +56,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -253,6 +254,8 @@ private fun headerFontScale(level: Int): Float = when (level) {
 }
 
 private const val WEB_VIEW_NORMAL_LINE_HEIGHT_MULTIPLIER = 1.2f
+private const val TAG_STABLE_PAGE_NAV = "StablePageNav"
+private const val EXPLICIT_NAVIGATION_SHIFT_ANCHOR_WINDOW_MS = 10_000L
 
 private fun paginationLineHeightMultiplierForWebViewSetting(multiplier: Float): Float {
     return if (abs(multiplier - 1.0f) < 0.001f) WEB_VIEW_NORMAL_LINE_HEIGHT_MULTIPLIER else multiplier
@@ -410,6 +413,30 @@ internal object CfiUtils {
 
     fun getPath(cfi: String): String = cfi.split(':').first()
     fun getOffset(cfi: String): Int = cfi.substringAfter(':', "0").toIntOrNull() ?: 0
+    fun getOffsetOrNull(cfi: String): Int? = cfi.substringAfter(':', "").toIntOrNull()
+
+    fun isPathStrictlyBetween(candidate: String, start: String, end: String): Boolean {
+        val candidateParts = pathParts(candidate) ?: return false
+        val startParts = pathParts(start) ?: return false
+        val endParts = pathParts(end) ?: return false
+        return comparePathParts(candidateParts, startParts) > 0 &&
+            comparePathParts(candidateParts, endParts) < 0
+    }
+
+    private fun pathParts(cfi: String): List<Int>? {
+        val segments = getPath(cfi).split('/').filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return null
+        return segments.map { it.toIntOrNull() ?: return null }
+    }
+
+    private fun comparePathParts(first: List<Int>, second: List<Int>): Int {
+        val length = minOf(first.size, second.size)
+        for (index in 0 until length) {
+            val cmp = first[index].compareTo(second[index])
+            if (cmp != 0) return cmp
+        }
+        return first.size.compareTo(second.size)
+    }
 }
 
 private fun highlightQueryInText(
@@ -729,6 +756,7 @@ fun PaginatedReaderScreen(
     effectiveText: Color,
     pagerState: PagerState,
     isPageTurnAnimationEnabled: Boolean,
+    isRightToLeftPagination: Boolean = false,
     searchQuery: String,
     fontSizeMultiplier: Float,
     lineHeightMultiplier: Float,
@@ -741,6 +769,9 @@ fun PaginatedReaderScreen(
     ttsHighlightInfo: TtsHighlightInfo?,
     initialChapterIndexInBook: Int?,
     fallbackLocatorForReconfiguration: Locator? = null,
+    explicitNavigationAnchor: Locator? = null,
+    explicitNavigationEpoch: Long = 0L,
+    isExternalNavigationInProgress: Boolean = false,
     onReconfigurationAnchorCaptured: (Locator) -> Unit = {},
     onReconfigurationRestoreActiveChanged: (Boolean) -> Unit = {},
     onPaginatorReady: (IPaginator) -> Unit,
@@ -754,6 +785,7 @@ fun PaginatedReaderScreen(
     onStartTtsFromSelection: (String, Int) -> Unit,
     onNoteRequested: (String?) -> Unit,
     onFootnoteRequested: (String) -> Unit,
+    onInternalLinkNavigated: (Int) -> Unit = {},
     userHighlights: List<UserHighlight>,
     onHighlightCreated: (String, String, String) -> Unit,
     onHighlightDeleted: (String) -> Unit,
@@ -784,6 +816,11 @@ fun PaginatedReaderScreen(
     } else Modifier
 
     var isNavigatingByLink by remember { mutableStateOf(false) }
+    var localExplicitNavigationAnchor by remember { mutableStateOf<Locator?>(null) }
+    var localExplicitNavigationEpoch by remember { mutableLongStateOf(0L) }
+    val latestExternalNavigationAnchor by rememberUpdatedState(explicitNavigationAnchor)
+    val latestExternalNavigationEpoch by rememberUpdatedState(explicitNavigationEpoch)
+    val latestIsExternalNavigationInProgress by rememberUpdatedState(isExternalNavigationInProgress)
 
     BoxWithConstraints(modifier = modifier.fillMaxSize().background(effectiveBg)) {
         val textMeasurer = rememberTextMeasurer()
@@ -1107,19 +1144,96 @@ fun PaginatedReaderScreen(
 
         LaunchedEffect(paginator, pagerState) {
             paginator.pageShiftRequest.collect { shiftAmount ->
-                val anchor = resolvePaginatedReconfigurationAnchor(
-                    currentPageLocator = anchorLocatorForReconfig,
-                    fallbackLocator = latestFallbackLocatorForReconfiguration
+                if (pagerState.pageCount <= 0) {
+                    Timber.tag(TAG_STABLE_PAGE_NAV)
+                        .w("shift_drop reason=emptyPager shift=$shiftAmount")
+                    return@collect
+                }
+
+                val bookPaginator = paginator as? BookPaginator
+                val currentPageBeforeShift = pagerState.currentPage
+                val now = System.currentTimeMillis()
+                val externalAgeMs = if (latestExternalNavigationEpoch > 0L) {
+                    now - latestExternalNavigationEpoch
+                } else {
+                    -1L
+                }
+                val localAgeMs = if (localExplicitNavigationEpoch > 0L) {
+                    now - localExplicitNavigationEpoch
+                } else {
+                    -1L
+                }
+                val recentExternalNavigation =
+                    externalAgeMs in 0L..EXPLICIT_NAVIGATION_SHIFT_ANCHOR_WINDOW_MS
+                val recentLocalNavigation =
+                    localAgeMs in 0L..EXPLICIT_NAVIGATION_SHIFT_ANCHOR_WINDOW_MS
+                val activeExplicitAnchor = when {
+                    latestIsExternalNavigationInProgress -> latestExternalNavigationAnchor
+                    isNavigatingByLink -> localExplicitNavigationAnchor
+                    else -> null
+                }
+                val recentExplicitAnchor = when {
+                    recentExternalNavigation -> latestExternalNavigationAnchor
+                    recentLocalNavigation -> localExplicitNavigationAnchor
+                    else -> null
+                }
+                val activeExplicitAnchorSource = when {
+                    activeExplicitAnchor == null -> null
+                    latestIsExternalNavigationInProgress -> "explicit_external_active"
+                    else -> "explicit_link"
+                }
+                val recentExplicitAnchorSource = when {
+                    recentExplicitAnchor == null -> null
+                    recentExternalNavigation -> "explicit_external_recent"
+                    else -> "explicit_link_recent"
+                }
+                val currentPageLocator = bookPaginator?.getLocatorForPage(currentPageBeforeShift)
+                val fallbackLocator = latestFallbackLocatorForReconfiguration
+                var anchorSource = "none"
+                val anchor = when {
+                    anchorLocatorForReconfig != null -> {
+                        anchorSource = "reconfiguration"
+                        anchorLocatorForReconfig
+                    }
+                    activeExplicitAnchor != null -> {
+                        anchorSource = activeExplicitAnchorSource ?: "explicit_active"
+                        activeExplicitAnchor
+                    }
+                    fallbackLocator != null -> {
+                        anchorSource = "last_known"
+                        fallbackLocator
+                    }
+                    recentExplicitAnchor != null -> {
+                        anchorSource = recentExplicitAnchorSource ?: "explicit_recent"
+                        recentExplicitAnchor
+                    }
+                    currentPageLocator != null -> {
+                        anchorSource = "current_page"
+                        currentPageLocator
+                    }
+                    else -> null
+                }
+
+                Timber.tag(TAG_STABLE_PAGE_NAV).d(
+                    "shift_received shift=$shiftAmount currentPage=$currentPageBeforeShift anchorSource=$anchorSource anchor=$anchor currentLocator=$currentPageLocator fallback=$fallbackLocator externalInProgress=$latestIsExternalNavigationInProgress linkInProgress=$isNavigatingByLink externalAgeMs=$externalAgeMs localAgeMs=$localAgeMs"
                 )
+
                 val resolvedPage = anchor?.let { locator ->
-                    (paginator as? BookPaginator)?.findPageForLocator(locator)
+                    bookPaginator?.findStablePageForLocator(locator)
                 }
 
                 if (resolvedPage != null) {
+                    Timber.tag(TAG_STABLE_PAGE_NAV).d(
+                        "shift_apply_stable shift=$shiftAmount from=$currentPageBeforeShift to=$resolvedPage anchorSource=$anchorSource anchor=$anchor"
+                    )
                     pagerState.scrollToPage(resolvedPage)
                     paginator.onUserScrolledTo(resolvedPage)
                 } else {
-                    val newPage = pagerState.currentPage + shiftAmount
+                    val maxPage = (pagerState.pageCount - 1).coerceAtLeast(0)
+                    val newPage = (currentPageBeforeShift + shiftAmount).coerceIn(0, maxPage)
+                    Timber.tag(TAG_STABLE_PAGE_NAV).w(
+                        "shift_apply_relative shift=$shiftAmount from=$currentPageBeforeShift to=$newPage anchorSource=$anchorSource anchor=$anchor"
+                    )
                     pagerState.scrollToPage(newPage)
                     paginator.onUserScrolledTo(newPage)
                 }
@@ -1134,6 +1248,7 @@ fun PaginatedReaderScreen(
             uiState = uiState,
             pagerState = pagerState,
             isPageTurnAnimationEnabled = isPageTurnAnimationEnabled,
+            isRightToLeftPagination = isRightToLeftPagination,
             effectiveBg = effectiveBg,
             searchQuery = searchQuery,
             ttsHighlightInfo = ttsHighlightInfo,
@@ -1163,100 +1278,126 @@ fun PaginatedReaderScreen(
                     }
                 }
             },
+            onInternalLinkNavigated = onInternalLinkNavigated,
             onLinkClick = { currentChapterPath, href, onNavComplete ->
                 coroutineScope.launch(Dispatchers.IO) {
-                    isNavigatingByLink = true
-                    var isFootnote = false
-                    var footnoteHtml: String? = null
+                    withContext(Dispatchers.Main) { isNavigatingByLink = true }
+                    try {
+                        var isFootnote = false
+                        var footnoteHtml: String? = null
 
-                    val sourceChapter =
-                        book.chaptersForPagination.find { it.absPath == currentChapterPath }
-                    if (sourceChapter != null) {
-                        val sourceHtml = sourceChapter.htmlContent.ifEmpty {
-                            try {
-                                File(book.extractionBasePath, sourceChapter.htmlFilePath)
-                                    .readText()
-                            } catch (_: Exception) {
-                                ""
-                            }
-                        }
-                        if (sourceHtml.isNotEmpty()) {
-                            val doc = Jsoup.parse(sourceHtml)
-                            val safeHref = href.replace("\"", "\\\"")
-                            val aTag = doc.select("a[href=\"$safeHref\"]").first()
-
-                            if (aTag?.attr("epub:type") == "noteref" || href.startsWith("#")) {
-                                isFootnote = true
-                            }
-                        } else if (href.startsWith("#")) {
-                            isFootnote = true
-                        }
-                    } else if (href.startsWith("#")) {
-                        isFootnote = true
-                    }
-
-                    if (isFootnote) {
-                        val decodedHref = try {
-                            URLDecoder.decode(href, "UTF-8")
-                        } catch (_: Exception) {
-                            href
-                        }
-                        val parts = decodedHref.split('#', limit = 2)
-                        val pathPart = parts[0]
-                        val anchor = if (parts.size > 1) parts[1] else null
-
-                        if (anchor != null) {
-                            val targetPath = if (pathPart.isBlank()) currentChapterPath else {
+                        val sourceChapter =
+                            book.chaptersForPagination.find { it.absPath == currentChapterPath }
+                        if (sourceChapter != null) {
+                            val sourceHtml = sourceChapter.htmlContent.ifEmpty {
                                 try {
-                                    URI(currentChapterPath).resolve(pathPart)
-                                        .normalize().path
+                                    File(book.extractionBasePath, sourceChapter.htmlFilePath)
+                                        .readText()
                                 } catch (_: Exception) {
-                                    null
+                                    ""
                                 }
                             }
+                            if (sourceHtml.isNotEmpty()) {
+                                val doc = Jsoup.parse(sourceHtml)
+                                val safeHref = href.replace("\"", "\\\"")
+                                val aTag = doc.select("a[href=\"$safeHref\"]").first()
 
-                            if (targetPath != null) {
-                                val targetChapter = book.chaptersForPagination.find {
+                                val linkType = aTag?.attr("epub:type").orEmpty()
+                                val linkRole = aTag?.attr("role").orEmpty()
+                                if (
+                                    linkType.contains("noteref", ignoreCase = true) ||
+                                    linkRole.contains("doc-noteref", ignoreCase = true)
+                                ) {
+                                    isFootnote = true
+                                }
+                            }
+                        }
+
+                        run {
+                            val decodedHref = try {
+                                URLDecoder.decode(href, "UTF-8")
+                            } catch (_: Exception) {
+                                href
+                            }
+                            val parts = decodedHref.split('#', limit = 2)
+                            val pathPart = parts[0]
+                            val anchor = if (parts.size > 1) parts[1] else null
+
+                            if (anchor != null) {
+                                val targetPath = if (pathPart.isBlank()) currentChapterPath else {
                                     try {
-                                        URI(it.absPath).normalize().path == targetPath
+                                        URI(currentChapterPath).resolve(pathPart)
+                                            .normalize().path
                                     } catch (_: Exception) {
-                                        false
+                                        null
                                     }
                                 }
 
-                                if (targetChapter != null) {
-                                    val targetHtml = targetChapter.htmlContent.ifEmpty {
+                                if (targetPath != null) {
+                                    val targetChapter = book.chaptersForPagination.find {
                                         try {
-                                            File(
-                                                book.extractionBasePath,
-                                                targetChapter.htmlFilePath
-                                            ).readText()
+                                            URI(it.absPath).normalize().path == targetPath
                                         } catch (_: Exception) {
-                                            ""
+                                            false
                                         }
                                     }
-                                    if (targetHtml.isNotEmpty()) {
-                                        val doc = Jsoup.parse(targetHtml)
-                                        val noteEl = doc.getElementById(anchor)
-                                        if (noteEl != null) {
-                                            footnoteHtml = noteEl.html()
+
+                                    if (targetChapter != null) {
+                                        val targetHtml = targetChapter.htmlContent.ifEmpty {
+                                            try {
+                                                File(
+                                                    book.extractionBasePath,
+                                                    targetChapter.htmlFilePath
+                                                ).readText()
+                                            } catch (_: Exception) {
+                                                ""
+                                            }
+                                        }
+                                        if (targetHtml.isNotEmpty()) {
+                                            val doc = Jsoup.parse(targetHtml)
+                                            val noteEl = doc.getElementById(anchor)
+                                            if (noteEl != null) {
+                                                val targetType = noteEl.attr("epub:type")
+                                                val targetRole = noteEl.attr("role")
+                                                val targetClass = noteEl.className()
+                                                val targetLooksLikeFootnote =
+                                                    targetType.contains("footnote", ignoreCase = true) ||
+                                                        targetRole.contains("doc-footnote", ignoreCase = true) ||
+                                                        targetClass.contains("footnote", ignoreCase = true)
+                                                if (isFootnote || targetLooksLikeFootnote) {
+                                                    footnoteHtml = noteEl.html()
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    withContext(Dispatchers.Main) {
                         if (!footnoteHtml.isNullOrBlank()) {
-                            onFootnoteRequested(footnoteHtml)
-                            isNavigatingByLink = false
+                            withContext(Dispatchers.Main) { onFootnoteRequested(footnoteHtml) }
                         } else {
-                            paginator.navigateToHref(currentChapterPath, href) {
-                                onNavComplete(it)
-                                isNavigatingByLink = false
+                            val targetPage = (paginator as? BookPaginator)?.findStablePageForHref(currentChapterPath, href)
+                            withContext(Dispatchers.Main) {
+                                if (targetPage != null) {
+                                    val targetAnchor = (paginator as? BookPaginator)?.getLocatorForPage(targetPage)
+                                    val navigationEpoch = System.currentTimeMillis()
+                                    localExplicitNavigationAnchor = targetAnchor
+                                    localExplicitNavigationEpoch = navigationEpoch
+                                    Timber.tag(TAG_STABLE_PAGE_NAV).d(
+                                        "link_resolved href=$href targetPage=$targetPage anchor=$targetAnchor epoch=$navigationEpoch"
+                                    )
+                                    paginator.onUserScrolledTo(targetPage)
+                                    onNavComplete(targetPage)
+                                } else {
+                                    Timber.tag(TAG_STABLE_PAGE_NAV).w(
+                                        "link_failed href=$href currentChapterPath=$currentChapterPath"
+                                    )
+                                }
                             }
                         }
+                    } finally {
+                        withContext(Dispatchers.Main) { isNavigatingByLink = false }
                     }
                 }
             },
@@ -1359,7 +1500,7 @@ private fun findFuzzyMatch(source: String, target: String, ignoreCase: Boolean =
     return null
 }
 
-private fun getHighlightOffsetsInBlock(
+internal fun getHighlightOffsetsInBlock(
     block: TextContentBlock, highlight: UserHighlight
 ): IntRange? {
     if (block.cfi == null) return null
@@ -1368,6 +1509,7 @@ private fun getHighlightOffsetsInBlock(
     val parts = highlight.cfi.split('|')
     val startCfi = parts.firstOrNull() ?: highlight.cfi
     val endCfi = parts.lastOrNull()
+    val isMultipartHighlight = endCfi != null && endCfi != startCfi
 
     @Suppress("REDUNDANT_ELSE_IN_WHEN") val blockStartAbs = when (block) {
         is ParagraphBlock -> block.startCharOffsetInSource
@@ -1376,6 +1518,9 @@ private fun getHighlightOffsetsInBlock(
         is ListItemBlock -> block.startCharOffsetInSource
         else -> 0
     }
+    val blockEndAbs = block.endCharOffsetInSource
+        .takeIf { it > blockStartAbs }
+        ?: (blockStartAbs + block.content.text.length)
 
     Timber.d(
         "getHighlightOffsetsInBlock: Checking Block=${block.cfi} (AbsStart=$blockStartAbs) against Highlight=${highlight.cfi}"
@@ -1419,48 +1564,28 @@ private fun getHighlightOffsetsInBlock(
         )
     }
 
-    var isAfterStart = false
-    var isBeforeEnd = true
-
-    if (relevantPart == null) {
-        if (startCfi.isNotEmpty()) {
-            try {
-                if (CfiUtils.compare(block.cfi!!, startCfi) > 0) {
-                    isAfterStart = true
-                }
-            } catch (_: Exception) {
-            }
-        }
-
-        if (endCfi != null && endCfi != startCfi) {
-            try {
-                val endPath = CfiUtils.getPath(endCfi)
-                val cmp = CfiUtils.compare(blockPath, endPath)
-                Timber.d(" -> Comparing BlockPath ($blockPath) vs EndPath ($endPath). Result: $cmp")
-                if (CfiUtils.compare(blockPath, endPath) > 0) {
-                    isBeforeEnd = false
-                }
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    Timber.d(" -> relevantPart=$relevantPart, isAfterStart=$isAfterStart, isBeforeEnd=$isBeforeEnd")
-
-    if (relevantPart == null && (!isAfterStart || !isBeforeEnd)) {
-        return null
-    }
-
     val blockText = block.content.text
     val highlightText = highlight.text
 
     if (blockText.isEmpty() || highlightText.isEmpty()) return null
-    if (highlightText.contains(blockText, ignoreCase = false)) return 0 until blockText.length
-    if (highlightText.contains(blockText, ignoreCase = true)) return 0 until blockText.length
 
-    var startIndex = blockText.indexOf(highlightText, ignoreCase = false)
-    if (startIndex == -1) {
-        startIndex = blockText.indexOf(highlightText, ignoreCase = true)
+    val isIntermediateBlock = relevantPart == null &&
+        isMultipartHighlight &&
+        CfiUtils.isPathStrictlyBetween(block.cfi!!, startCfi, endCfi!!)
+
+    Timber.d(" -> relevantPart=$relevantPart, isIntermediateBlock=$isIntermediateBlock")
+
+    if (relevantPart == null) {
+        if (!isIntermediateBlock) return null
+        if (highlightText.contains(blockText, ignoreCase = false)) return 0 until blockText.length
+        if (highlightText.contains(blockText, ignoreCase = true)) return 0 until blockText.length
+        val normBlock = blockText.filter { !it.isWhitespace() }
+        val normHighlight = highlightText.filter { !it.isWhitespace() }
+        return if (normBlock.isNotBlank() && normHighlight.contains(normBlock, ignoreCase = true)) {
+            0 until blockText.length
+        } else {
+            null
+        }
     }
 
     if (relevantPart != null) {
@@ -1482,11 +1607,27 @@ private fun getHighlightOffsetsInBlock(
         Timber.d(" -> Path Equivalence: StartMatches=$startMatches, EndMatches=$endMatches")
 
         if (startMatches || endMatches) {
+            val startAbs = CfiUtils.getOffsetOrNull(startCfi)
+            val endAbs = endCfi?.let { CfiUtils.getOffsetOrNull(it) }
+            if (startMatches && endMatches && startAbs != null && endAbs != null) {
+                val rangeStartAbs = minOf(startAbs, endAbs)
+                val rangeEndAbs = maxOf(startAbs, endAbs)
+                if (rangeEndAbs <= blockStartAbs || rangeStartAbs >= blockEndAbs) {
+                    Timber.d(
+                        " -> Skipping same-path split block outside highlight offsets. " +
+                            "highlight=$rangeStartAbs..$rangeEndAbs block=$blockStartAbs..$blockEndAbs"
+                    )
+                    return null
+                }
+            } else {
+                if (startMatches && startAbs != null && startAbs >= blockEndAbs) return null
+                if (endMatches && endAbs != null && endAbs <= blockStartAbs) return null
+            }
             var s = 0
             var e = blockText.length
 
             if (startMatches) {
-                val absOffset = CfiUtils.getOffset(startCfi)
+                val absOffset = startAbs ?: CfiUtils.getOffset(startCfi)
                 val relOffset = absOffset - blockStartAbs
 
                 if (relOffset < 0) {
@@ -1530,7 +1671,7 @@ private fun getHighlightOffsetsInBlock(
             }
 
             if (endMatches) {
-                val absOffset = CfiUtils.getOffset(endCfi!!)
+                val absOffset = endAbs ?: CfiUtils.getOffset(endCfi!!)
                 val relOffset = absOffset - blockStartAbs
 
                 Timber.d(
@@ -1559,18 +1700,16 @@ private fun getHighlightOffsetsInBlock(
         }
     }
 
-    if (startIndex >= 0) {
-        return startIndex until (startIndex + highlightText.length)
+    if (highlightText.contains(blockText, ignoreCase = false)) return 0 until blockText.length
+    if (highlightText.contains(blockText, ignoreCase = true)) return 0 until blockText.length
+
+    var startIndex = blockText.indexOf(highlightText, ignoreCase = false)
+    if (startIndex == -1) {
+        startIndex = blockText.indexOf(highlightText, ignoreCase = true)
     }
 
-    if (relevantPart == null) {
-        @Suppress("KotlinConstantConditions") if (isAfterStart) {
-            val normBlock = blockText.filter { !it.isWhitespace() }
-            val normHighlight = highlightText.filter { !it.isWhitespace() }
-            if (normHighlight.contains(normBlock, ignoreCase = true)) {
-                return 0 until blockText.length
-            }
-        }
+    if (startIndex >= 0) {
+        return startIndex until (startIndex + highlightText.length)
     }
 
     val match = findFuzzyMatch(blockText, highlightText)
@@ -2073,6 +2212,7 @@ internal fun PaginatedReaderContent(
     uiState: PaginatedReaderUiState,
     pagerState: PagerState,
     isPageTurnAnimationEnabled: Boolean,
+    isRightToLeftPagination: Boolean = false,
     effectiveBg: Color,
     effectiveText: Color,
     searchQuery: String,
@@ -2084,6 +2224,7 @@ internal fun PaginatedReaderContent(
     onGetPage: (Int) -> Page?,
     onGetChapterPath: (Int) -> String?,
     onLinkClick: (currentChapterPath: String, href: String, onNavComplete: (Int) -> Unit) -> Unit,
+    onInternalLinkNavigated: (Int) -> Unit,
     onTap: (Offset?) -> Unit,
     isProUser: Boolean,
     isOss: Boolean,
@@ -2231,7 +2372,8 @@ internal fun PaginatedReaderContent(
                                 }
                             }
                         },
-                        beyondViewportPageCount = 1
+                        beyondViewportPageCount = 1,
+                        reverseLayout = isRightToLeftPagination
                     ) { pageIndex ->
                         val pageOffset =
                             (pageIndex - pagerState.currentPage) - pagerState.currentPageOffsetFraction
@@ -2432,7 +2574,11 @@ internal fun PaginatedReaderContent(
                                             } else {
                                                 currentChapterPath?.let { path ->
                                                     onLinkClick(path, href) { targetPageIndex ->
+                                                        onInternalLinkNavigated(targetPageIndex)
                                                         coroutineScope.launch {
+                                                            Timber.tag(TAG_STABLE_PAGE_NAV).d(
+                                                                "link_scroll targetPage=$targetPageIndex currentPage=${pagerState.currentPage}"
+                                                            )
                                                             pagerState.scrollToPage(targetPageIndex)
                                                         }
                                                     }

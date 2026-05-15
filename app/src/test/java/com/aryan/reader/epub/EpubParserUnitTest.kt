@@ -15,6 +15,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 class EpubParserUnitTest {
@@ -104,6 +105,43 @@ class EpubParserUnitTest {
     }
 
     @Test
+    fun `metadata only extraction streams images to disk without retaining image bytes`() {
+        val cacheDir = temp.newFolder("cache-metadata-stream")
+        val extractionDir = temp.newFolder("extract-metadata-stream")
+        val parser = EpubParser(contextWithCache(cacheDir))
+        val imageBytes = ByteArray(2 * 1024 * 1024) { 7 }
+        val zipFileOnDisk = File(temp.root, "metadata-stream.epub")
+        zipFileOnDisk.writeBytes(
+            zipBinaryBytes(
+                "META-INF/container.xml" to """
+                    <container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>
+                """.trimIndent().toByteArray(Charsets.UTF_8),
+                "OEBPS/content.opf" to """
+                    <package>
+                        <metadata />
+                        <manifest>
+                            <item id="cover" href="images/cover.jpg" media-type="image/jpeg"/>
+                        </manifest>
+                        <spine />
+                    </package>
+                """.trimIndent().toByteArray(Charsets.UTF_8),
+                "OEBPS/images/cover.jpg" to imageBytes
+            )
+        )
+
+        val files = parser.extractEpubContents(
+            zipFile = ZipFile(zipFileOnDisk),
+            extractionDir = extractionDir,
+            parseContent = false,
+            extractImagesForMetadata = true
+        )
+
+        assertTrue(files["META-INF/container.xml"]!!.data.isNotEmpty())
+        assertEquals(0, files["OEBPS/images/cover.jpg"]!!.data.size)
+        assertEquals(imageBytes.size.toLong(), File(extractionDir, "OEBPS/images/cover.jpg").length())
+    }
+
+    @Test
     fun `createEpubBook reuses active extraction cache on matching warm open`() = runTest {
         val cacheDir = temp.newFolder("cache-warm-open")
         val parser = EpubParser(contextWithCache(cacheDir))
@@ -127,6 +165,35 @@ class EpubParserUnitTest {
         assertEquals(first.title, second.title)
         assertEquals(first.chapters.size, second.chapters.size)
         assertTrue(File(activeDir, "sentinel.txt").isFile)
+    }
+
+    @Test
+    fun `createEpubBook invalidates active extraction cache when source fingerprint changes`() = runTest {
+        val cacheDir = temp.newFolder("cache-source-change")
+        val context = contextWithCache(cacheDir)
+        val parser = EpubParser(context)
+
+        val first = parser.createEpubBook(
+            inputStream = ByteArrayInputStream(sampleEpubBytes()),
+            bookId = "changed-book",
+            shouldUseToc = true,
+            originalBookNameHint = "changed.epub",
+            sourceFingerprint = "100:1000"
+        )
+        val activeDir = ImportedFileCache.activeBookDir(context, "changed-book")
+        File(activeDir, "sentinel.txt").writeText("old extraction")
+
+        val second = parser.createEpubBook(
+            inputStream = ByteArrayInputStream(sampleEpubBytes(author = "Edited Writer")),
+            bookId = "changed-book",
+            shouldUseToc = true,
+            originalBookNameHint = "changed.epub",
+            sourceFingerprint = "120:2000"
+        )
+
+        assertEquals("Jane Writer", first.author)
+        assertEquals("Edited Writer", second.author)
+        assertFalse(File(activeDir, "sentinel.txt").isFile)
     }
 
     @Test
@@ -325,7 +392,7 @@ class EpubParserUnitTest {
         return context
     }
 
-    private fun sampleEpubBytes(): ByteArray = zipBytes(
+    private fun sampleEpubBytes(author: String = "Jane Writer"): ByteArray = zipBytes(
         "META-INF/container.xml" to """
             <container version="1.0">
                 <rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles>
@@ -335,7 +402,7 @@ class EpubParserUnitTest {
             <package xmlns:dc="http://purl.org/dc/elements/1.1/">
                 <metadata>
                     <dc:title>Sample/Book</dc:title>
-                    <dc:creator>Jane Writer</dc:creator>
+                    <dc:creator>$author</dc:creator>
                     <dc:language>en</dc:language>
                     <dc:description>Long description</dc:description>
                     <meta name="calibre:series" content="Series Name"/>
@@ -415,11 +482,15 @@ class EpubParserUnitTest {
     )
 
     private fun zipBytes(vararg entries: Pair<String, String>): ByteArray {
+        return zipBinaryBytes(*entries.map { it.first to it.second.toByteArray(Charsets.UTF_8) }.toTypedArray())
+    }
+
+    private fun zipBinaryBytes(vararg entries: Pair<String, ByteArray>): ByteArray {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
             entries.forEach { (name, content) ->
                 zip.putNextEntry(ZipEntry(name))
-                zip.write(content.toByteArray(Charsets.UTF_8))
+                zip.write(content)
                 zip.closeEntry()
             }
         }

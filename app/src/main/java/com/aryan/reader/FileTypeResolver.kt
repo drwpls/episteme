@@ -1,130 +1,66 @@
 package com.aryan.reader
 
-private val codeOrDataExtensions = setOf(
-    "csv",
-    "tsv",
-    "json",
-    "xml",
-    "log",
-    "java",
-    "kt",
-    "py",
-    "js",
-    "cpp",
-    "c",
-    "cs",
-    "rb",
-    "go"
-)
-
-private val manualOnlyReaderMimeTypes = setOf(
-    "text/csv",
-    "text/comma-separated-values",
-    "text/tab-separated-values",
-    "application/json",
-    "application/xml",
-    "text/xml",
-    "text/x-java-source",
-    "text/x-python",
-    "text/x-kotlin",
-    "text/javascript",
-    "application/javascript",
-    "text/x-c",
-    "text/x-c++",
-    "text/x-csharp",
-    "text/x-ruby",
-    "text/x-go",
-    "text/x-log"
-)
+import com.aryan.reader.shared.SharedFileCapabilities
 
 internal fun resolveFileTypeFromName(fileName: String?): FileType? {
-    val lowerName = fileName?.lowercase()?.takeIf { it.isNotBlank() } ?: return null
-    val effectiveName = lowerName.withTransparentTextSuffix()
+    return SharedFileCapabilities.resolveFileTypeForName(fileName)
+}
 
-    return when {
-        effectiveName.endsWith(".cbz") -> FileType.CBZ
-        effectiveName.endsWith(".cbr") -> FileType.CBR
-        effectiveName.endsWith(".cb7") -> FileType.CB7
-        effectiveName.endsWith(".pdf") -> FileType.PDF
-        effectiveName.endsWith(".epub") -> FileType.EPUB
-        effectiveName.endsWith(".mobi") || effectiveName.endsWith(".azw3") || effectiveName.endsWith(".prc") -> FileType.MOBI
-        effectiveName.endsWith(".fb2") || effectiveName.endsWith(".fb2.zip") -> FileType.FB2
-        effectiveName.endsWith(".md") || effectiveName.endsWith(".markdown") -> FileType.MD
-        effectiveName.endsWith(".html") || effectiveName.endsWith(".xhtml") || effectiveName.endsWith(".htm") -> FileType.HTML
-        effectiveName.endsWith(".docx") -> FileType.DOCX
-        effectiveName.endsWith(".odt") -> FileType.ODT
-        effectiveName.endsWith(".fodt") -> FileType.FODT
-        effectiveName.extensionAfterLastDot() in codeOrDataExtensions -> FileType.HTML
-        effectiveName.endsWith(".txt") -> FileType.TXT
-        else -> null
+internal fun resolveFileTypeFromMetadata(fileName: String?, mimeType: String?): FileType? {
+    val normalizedMimeType = mimeType
+        ?.substringBefore(';')
+        ?.trim()
+        ?.lowercase()
+    return when (normalizedMimeType) {
+        "application/vnd.oasis.opendocument.text" -> FileType.ODT
+        "application/x-vnd.oasis.opendocument.text-flat-xml" -> FileType.FODT
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> FileType.DOCX
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> FileType.PPTX
+        "application/zip", "application/vnd.comicbook+zip", "application/x-cbz" -> {
+            when {
+                fileName?.endsWith(".cbz", ignoreCase = true) == true -> FileType.CBZ
+                fileName?.endsWith(".fb2.zip", ignoreCase = true) == true -> FileType.FB2
+                else -> null
+            }
+        }
+        "application/vnd.comicbook-rar", "application/x-cbr", "application/x-rar-compressed" -> {
+            if (fileName?.endsWith(".cbr", ignoreCase = true) == true) FileType.CBR else null
+        }
+        "application/x-cb7", "application/x-7z-compressed" -> {
+            if (fileName?.endsWith(".cb7", ignoreCase = true) == true) FileType.CB7 else null
+        }
+        "application/pdf" -> FileType.PDF
+        "application/epub+zip" -> FileType.EPUB
+        "application/x-fictionbook+xml", "application/x-zip-compressed-fb2" -> FileType.FB2
+        "application/x-mobipocket-ebook", "application/vnd.amazon.ebook", "application/vnd.amazon.mobi8-ebook" -> FileType.MOBI
+        "text/markdown", "text/x-markdown" -> FileType.MD
+        "text/html", "application/xhtml+xml" -> FileType.HTML
+        "text/csv", "text/comma-separated-values", "text/tab-separated-values",
+        "application/json", "application/xml", "text/xml",
+        "text/x-java-source", "text/x-python", "text/x-kotlin",
+        "text/javascript", "application/javascript",
+        "text/x-c", "text/x-c++", "text/x-csharp", "text/x-ruby", "text/x-go", "text/x-log" -> FileType.HTML
+        "text/plain" -> resolveFileTypeFromName(fileName) ?: FileType.TXT
+        else -> resolveFileTypeFromName(fileName)
     }
 }
 
 internal fun isCodeOrDataFileName(fileName: String): Boolean {
-    return fileName.lowercase().withTransparentTextSuffix().extensionAfterLastDot() in codeOrDataExtensions
+    return SharedFileCapabilities.isCodeOrDataFileName(fileName)
 }
 
 internal fun isManualOnlyReaderFileName(fileName: String?): Boolean {
-    val lowerName = fileName?.lowercase()?.takeIf { it.isNotBlank() } ?: return false
-    return lowerName.withTransparentTextSuffix().extensionAfterLastDot() in codeOrDataExtensions
+    return SharedFileCapabilities.isManualOnlyReaderFileName(fileName)
 }
 
 internal fun isManualOnlyReaderMimeType(mimeType: String?): Boolean {
-    val normalized = mimeType?.lowercase() ?: return false
-    return normalized in manualOnlyReaderMimeTypes
+    return SharedFileCapabilities.isManualOnlyReaderMimeType(mimeType)
 }
 
 internal fun isLocalFolderSyncEligibleFile(name: String, mimeType: String?): Boolean {
-    if (isManualOnlyReaderFileName(name)) return false
-    if (resolveFileTypeFromName(name) != null) return true
-    return !isManualOnlyReaderMimeType(mimeType)
+    return SharedFileCapabilities.isLocalFolderSyncEligibleFile(name, mimeType)
 }
 
 internal fun resolveFileExtensionSuffixFromName(fileName: String?): String? {
-    val lowerName = fileName?.lowercase()?.takeIf { it.isNotBlank() } ?: return null
-    val effectiveName = lowerName.withTransparentTextSuffix()
-    val effectiveSuffix = when {
-        effectiveName.endsWith(".fb2.zip") -> ".fb2.zip"
-        effectiveName.endsWith(".markdown") -> ".markdown"
-        effectiveName.endsWith(".xhtml") -> ".xhtml"
-        effectiveName.extensionAfterLastDot() != null && resolveFileTypeFromName(effectiveName) != null -> ".${effectiveName.extensionAfterLastDot()}"
-        else -> null
-    } ?: return null
-
-    return if (effectiveName != lowerName && lowerName.endsWith(".txt")) {
-        "$effectiveSuffix.txt"
-    } else {
-        effectiveSuffix
-    }
-}
-
-private fun String.withTransparentTextSuffix(): String {
-    if (!endsWith(".txt")) return this
-    val innerName = removeSuffix(".txt")
-    if (innerName.isBlank() || !innerName.contains('.')) return this
-    return if (resolveFileTypeFromNameWithoutTransparentText(innerName) != null) innerName else this
-}
-
-private fun resolveFileTypeFromNameWithoutTransparentText(fileName: String): FileType? {
-    return when {
-        fileName.endsWith(".cbz") -> FileType.CBZ
-        fileName.endsWith(".cbr") -> FileType.CBR
-        fileName.endsWith(".cb7") -> FileType.CB7
-        fileName.endsWith(".pdf") -> FileType.PDF
-        fileName.endsWith(".epub") -> FileType.EPUB
-        fileName.endsWith(".mobi") || fileName.endsWith(".azw3") || fileName.endsWith(".prc") -> FileType.MOBI
-        fileName.endsWith(".fb2") || fileName.endsWith(".fb2.zip") -> FileType.FB2
-        fileName.endsWith(".md") || fileName.endsWith(".markdown") -> FileType.MD
-        fileName.endsWith(".html") || fileName.endsWith(".xhtml") || fileName.endsWith(".htm") -> FileType.HTML
-        fileName.endsWith(".docx") -> FileType.DOCX
-        fileName.endsWith(".odt") -> FileType.ODT
-        fileName.endsWith(".fodt") -> FileType.FODT
-        fileName.extensionAfterLastDot() in codeOrDataExtensions -> FileType.HTML
-        else -> null
-    }
-}
-
-private fun String.extensionAfterLastDot(): String? {
-    val dotIndex = lastIndexOf('.')
-    return if (dotIndex in 0..<lastIndex) substring(dotIndex + 1) else null
+    return SharedFileCapabilities.fileExtensionSuffixForName(fileName)
 }

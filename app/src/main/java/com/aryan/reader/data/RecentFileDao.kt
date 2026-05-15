@@ -33,7 +33,7 @@ interface RecentFileDao {
     @Upsert
     suspend fun insertOrUpdateFiles(files: List<RecentFileEntity>)
 
-    @Query("SELECT bookId, uriString, type, displayName, timestamp, coverImagePath, title, author, lastChapterIndex, lastPage, lastPositionCfi, progressPercentage, isRecent, isAvailable, lastModifiedTimestamp, isDeleted, locatorBlockIndex, locatorCharOffset, sourceFolderUri, isReflowPreferred, customName, fileSize, seriesName, seriesIndex, description FROM recent_files WHERE isDeleted = 0 ORDER BY timestamp DESC")
+    @Query("SELECT bookId, uriString, type, displayName, timestamp, coverImagePath, title, author, lastChapterIndex, lastPage, lastPositionCfi, progressPercentage, isRecent, isAvailable, lastModifiedTimestamp, isDeleted, locatorBlockIndex, locatorCharOffset, sourceFolderUri, isReflowPreferred, customName, fileSize, fileContentModifiedTimestamp, seriesName, seriesIndex, description, originalTitle, originalAuthor, originalSeriesName, originalSeriesIndex, originalDescription FROM recent_files WHERE isDeleted = 0 ORDER BY timestamp DESC")
     fun getRecentFiles(): Flow<List<RecentFileSummary>>
 
     @Query("SELECT * FROM recent_files WHERE sourceFolderUri = :sourceFolderUri AND isDeleted = 0")
@@ -45,7 +45,7 @@ interface RecentFileDao {
     @Query("UPDATE recent_files SET isReflowPreferred = :isPreferred WHERE bookId = :bookId")
     suspend fun updateReflowPreference(bookId: String, isPreferred: Boolean)
 
-    @Query("SELECT bookId, uriString, type, displayName, timestamp, coverImagePath, title, author, lastChapterIndex, lastPage, lastPositionCfi, progressPercentage, isRecent, isAvailable, lastModifiedTimestamp, isDeleted, locatorBlockIndex, locatorCharOffset, sourceFolderUri, isReflowPreferred, customName, fileSize, seriesName, seriesIndex, description FROM recent_files WHERE isDeleted = 0 ORDER BY timestamp DESC LIMIT :limit")
+    @Query("SELECT bookId, uriString, type, displayName, timestamp, coverImagePath, title, author, lastChapterIndex, lastPage, lastPositionCfi, progressPercentage, isRecent, isAvailable, lastModifiedTimestamp, isDeleted, locatorBlockIndex, locatorCharOffset, sourceFolderUri, isReflowPreferred, customName, fileSize, fileContentModifiedTimestamp, seriesName, seriesIndex, description, originalTitle, originalAuthor, originalSeriesName, originalSeriesIndex, originalDescription FROM recent_files WHERE isDeleted = 0 ORDER BY timestamp DESC LIMIT :limit")
     fun getRecentFilesList(limit: Int): List<RecentFileSummary>
 
     @Query("DELETE FROM recent_files WHERE bookId IN (:bookIds)")
@@ -94,26 +94,36 @@ interface RecentFileDao {
         SELECT * FROM recent_files
         WHERE sourceFolderUri IS NOT NULL
         AND isDeleted = 0
-        AND type IN ('PDF', 'EPUB', 'ODT', 'FODT', 'DOCX')
-        AND folderTextMetadataParsed = 0
+        AND (
+            (type IN ('PDF', 'EPUB', 'MOBI', 'FB2', 'ODT', 'FODT', 'DOCX') AND folderTextMetadataParsed = 0)
+            OR (type IN ('EPUB', 'MOBI', 'FB2') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
+        )
+        ORDER BY timestamp DESC
+        LIMIT :limit
     """)
-    suspend fun getFolderBooksNeedingTextMetadata(): List<RecentFileEntity>
+    suspend fun getFolderBooksNeedingTextMetadata(limit: Int): List<RecentFileEntity>
 
     @Query("""
         SELECT * FROM recent_files
         WHERE sourceFolderUri = :sourceFolderUri
         AND isDeleted = 0
-        AND type IN ('PDF', 'EPUB', 'ODT', 'FODT', 'DOCX')
-        AND folderTextMetadataParsed = 0
+        AND (
+            (type IN ('PDF', 'EPUB', 'MOBI', 'FB2', 'ODT', 'FODT', 'DOCX') AND folderTextMetadataParsed = 0)
+            OR (type IN ('EPUB', 'MOBI', 'FB2') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
+        )
+        ORDER BY timestamp DESC
+        LIMIT :limit
     """)
-    suspend fun getFolderBooksNeedingTextMetadata(sourceFolderUri: String): List<RecentFileEntity>
+    suspend fun getFolderBooksNeedingTextMetadata(sourceFolderUri: String, limit: Int): List<RecentFileEntity>
 
     @Query("""
         SELECT COUNT(*) FROM recent_files
         WHERE sourceFolderUri IS NOT NULL
         AND isDeleted = 0
-        AND type IN ('PDF', 'EPUB', 'ODT', 'FODT', 'DOCX')
-        AND folderTextMetadataParsed = 0
+        AND (
+            (type IN ('PDF', 'EPUB', 'MOBI', 'FB2', 'ODT', 'FODT', 'DOCX') AND folderTextMetadataParsed = 0)
+            OR (type IN ('EPUB', 'MOBI', 'FB2') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
+        )
     """)
     suspend fun countFolderBooksNeedingTextMetadata(): Int
 
@@ -121,8 +131,10 @@ interface RecentFileDao {
         SELECT COUNT(*) FROM recent_files
         WHERE sourceFolderUri = :sourceFolderUri
         AND isDeleted = 0
-        AND type IN ('PDF', 'EPUB', 'ODT', 'FODT', 'DOCX')
-        AND folderTextMetadataParsed = 0
+        AND (
+            (type IN ('PDF', 'EPUB', 'MOBI', 'FB2', 'ODT', 'FODT', 'DOCX') AND folderTextMetadataParsed = 0)
+            OR (type IN ('EPUB', 'MOBI', 'FB2') AND folderCoverMetadataParsed = 0 AND (coverImagePath IS NULL OR coverImagePath = ''))
+        )
     """)
     suspend fun countFolderBooksNeedingTextMetadata(sourceFolderUri: String): Int
 
@@ -130,10 +142,60 @@ interface RecentFileDao {
         UPDATE recent_files
         SET
             coverImagePath = COALESCE(:coverImagePath, coverImagePath),
-            title = COALESCE(:title, title),
-            author = COALESCE(:author, author),
+            title = CASE
+                WHEN :title IS NOT NULL AND (originalTitle IS NULL OR title IS NULL OR title = originalTitle OR title = displayName)
+                THEN :title
+                ELSE title
+            END,
+            author = CASE
+                WHEN :author IS NOT NULL AND (originalAuthor IS NULL OR author IS NULL OR author = originalAuthor)
+                THEN :author
+                ELSE author
+            END,
+            seriesName = CASE
+                WHEN :seriesName IS NOT NULL AND (originalSeriesName IS NULL OR seriesName IS NULL OR seriesName = originalSeriesName)
+                THEN :seriesName
+                ELSE seriesName
+            END,
+            seriesIndex = CASE
+                WHEN :seriesIndex IS NOT NULL AND (originalSeriesIndex IS NULL OR seriesIndex IS NULL OR seriesIndex = originalSeriesIndex)
+                THEN :seriesIndex
+                ELSE seriesIndex
+            END,
+            description = CASE
+                WHEN :description IS NOT NULL AND (originalDescription IS NULL OR description IS NULL OR description = originalDescription)
+                THEN :description
+                ELSE description
+            END,
+            originalTitle = CASE
+                WHEN :title IS NOT NULL AND (originalTitle IS NULL OR originalTitle = title OR originalTitle = displayName)
+                THEN :title
+                ELSE originalTitle
+            END,
+            originalAuthor = CASE
+                WHEN :author IS NOT NULL AND (originalAuthor IS NULL OR originalAuthor = author)
+                THEN :author
+                ELSE originalAuthor
+            END,
+            originalSeriesName = CASE
+                WHEN :seriesName IS NOT NULL AND (originalSeriesName IS NULL OR originalSeriesName = seriesName)
+                THEN :seriesName
+                ELSE originalSeriesName
+            END,
+            originalSeriesIndex = CASE
+                WHEN :seriesIndex IS NOT NULL AND (originalSeriesIndex IS NULL OR originalSeriesIndex = seriesIndex)
+                THEN :seriesIndex
+                ELSE originalSeriesIndex
+            END,
+            originalDescription = CASE
+                WHEN :description IS NOT NULL AND (originalDescription IS NULL OR originalDescription = description)
+                THEN :description
+                ELSE originalDescription
+            END,
             fileSize = CASE WHEN :fileSize > 0 THEN :fileSize ELSE fileSize END,
-            folderTextMetadataParsed = 1
+            fileContentModifiedTimestamp = CASE WHEN :fileContentModifiedTimestamp > 0 THEN :fileContentModifiedTimestamp ELSE fileContentModifiedTimestamp END,
+            folderTextMetadataParsed = CASE WHEN :textMetadataParsed = 1 THEN 1 ELSE folderTextMetadataParsed END,
+            folderCoverMetadataParsed = CASE WHEN :coverMetadataParsed = 1 THEN 1 ELSE folderCoverMetadataParsed END
         WHERE bookId = :bookId
     """)
     suspend fun updateExtractedMetadata(
@@ -141,7 +203,13 @@ interface RecentFileDao {
         coverImagePath: String?,
         title: String?,
         author: String?,
-        fileSize: Long
+        seriesName: String?,
+        seriesIndex: Double?,
+        description: String?,
+        fileSize: Long,
+        fileContentModifiedTimestamp: Long,
+        textMetadataParsed: Boolean,
+        coverMetadataParsed: Boolean
     )
 
     @Query("UPDATE recent_files SET sourceFolderUri = NULL WHERE sourceFolderUri IS NOT NULL")
@@ -149,4 +217,58 @@ interface RecentFileDao {
 
     @Query("UPDATE recent_files SET highlights = :highlightsJson, lastModifiedTimestamp = :timestamp WHERE bookId = :bookId")
     suspend fun updateHighlights(bookId: String, highlightsJson: String, timestamp: Long)
+
+    @Query("""
+        UPDATE recent_files
+        SET
+            title = :title,
+            author = :author,
+            seriesName = :seriesName,
+            seriesIndex = :seriesIndex,
+            description = :description,
+            customName = NULL,
+            originalTitle = COALESCE(originalTitle, title),
+            originalAuthor = COALESCE(originalAuthor, author),
+            originalSeriesName = COALESCE(originalSeriesName, seriesName),
+            originalSeriesIndex = COALESCE(originalSeriesIndex, seriesIndex),
+            originalDescription = COALESCE(originalDescription, description),
+            fileSize = CASE WHEN :fileSize > 0 THEN :fileSize ELSE fileSize END,
+            fileContentModifiedTimestamp = CASE WHEN :fileContentModifiedTimestamp > 0 THEN :fileContentModifiedTimestamp ELSE fileContentModifiedTimestamp END,
+            folderTextMetadataParsed = 1,
+            lastModifiedTimestamp = :timestamp
+        WHERE bookId = :bookId
+    """)
+    suspend fun updateUserEditableMetadata(
+        bookId: String,
+        title: String?,
+        author: String?,
+        seriesName: String?,
+        seriesIndex: Double?,
+        description: String?,
+        fileSize: Long,
+        fileContentModifiedTimestamp: Long,
+        timestamp: Long
+    )
+
+    @Query("""
+        UPDATE recent_files
+        SET
+            title = COALESCE(originalTitle, displayName),
+            author = originalAuthor,
+            seriesName = originalSeriesName,
+            seriesIndex = originalSeriesIndex,
+            description = originalDescription,
+            customName = NULL,
+            fileSize = CASE WHEN :fileSize > 0 THEN :fileSize ELSE fileSize END,
+            fileContentModifiedTimestamp = CASE WHEN :fileContentModifiedTimestamp > 0 THEN :fileContentModifiedTimestamp ELSE fileContentModifiedTimestamp END,
+            folderTextMetadataParsed = 1,
+            lastModifiedTimestamp = :timestamp
+        WHERE bookId = :bookId
+    """)
+    suspend fun restoreOriginalMetadata(
+        bookId: String,
+        fileSize: Long,
+        fileContentModifiedTimestamp: Long,
+        timestamp: Long
+    )
 }

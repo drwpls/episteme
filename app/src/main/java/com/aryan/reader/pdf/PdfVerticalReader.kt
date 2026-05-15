@@ -63,7 +63,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -81,7 +80,6 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -101,7 +99,6 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -116,6 +113,8 @@ import com.aryan.reader.ml.SpeechBubble
 import com.aryan.reader.pdf.data.PdfAnnotation
 import com.aryan.reader.pdf.data.PdfTextBox
 import com.aryan.reader.pdf.data.VirtualPage
+import com.aryan.reader.shared.pdf.calculatePdfVerticalPageLayoutPx
+import com.aryan.reader.shared.pdf.pdfVerticalPageGapDp
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -175,14 +174,70 @@ fun rememberVerticalPdfReaderState(): VerticalPdfReaderState {
 
 private data class PdfPageLayout(
     val index: Int,
-    val y: Float,
-    val height: Float,
-    val width: Float,
+    val yPx: Int,
+    val heightPx: Int,
+    val widthPx: Int,
     val widthDp: Dp,
     val heightDp: Dp
+) {
+    val y: Float
+        get() = yPx.toFloat()
+
+    val height: Float
+        get() = heightPx.toFloat()
+
+    val width: Float
+        get() = widthPx.toFloat()
+}
+
+private data class DividerLayout(val yPx: Int, val widthPx: Int, val heightPx: Int) {
+    val y: Float
+        get() = yPx.toFloat()
+
+    val width: Float
+        get() = widthPx.toFloat()
+
+    val height: Float
+        get() = heightPx.toFloat()
+}
+
+internal data class PdfLockedOrientationResetCamera(
+    val zoom: Float,
+    val panX: Float,
+    val panY: Float
 )
 
-private data class DividerLayout(val y: Float, val width: Float, val height: Float)
+internal fun calculateLockedOrientationResetCamera(
+    pageTopY: Float,
+    totalDocHeight: Float,
+    screenWidth: Float,
+    screenHeight: Float,
+    headerHeightPx: Float,
+    footerHeightPx: Float,
+    fitZoom: Float
+): PdfLockedOrientationResetCamera {
+    val targetPanY = headerHeightPx - (pageTopY * fitZoom)
+    val zoomedDocHeight = totalDocHeight * fitZoom
+    val minPanY = if (zoomedDocHeight < (screenHeight - headerHeightPx - footerHeightPx)) {
+        headerHeightPx
+    } else {
+        (screenHeight - footerHeightPx - zoomedDocHeight).coerceAtMost(headerHeightPx)
+    }
+    val finalPanY = targetPanY.coerceIn(minPanY, headerHeightPx)
+
+    val zoomedDocWidth = screenWidth * fitZoom
+    val targetPanX = if (zoomedDocWidth < screenWidth) {
+        (screenWidth - zoomedDocWidth) / 2f
+    } else {
+        0f
+    }
+
+    return PdfLockedOrientationResetCamera(
+        zoom = fitZoom,
+        panX = targetPanX,
+        panY = finalPanY
+    )
+}
 
 @Suppress("UnusedVariable")
 @SuppressLint("UnusedBoxWithConstraintsScope", "BinaryOperationInTimber")
@@ -192,6 +247,7 @@ internal fun PdfVerticalReader(
     modifier: Modifier = Modifier,
     state: VerticalPdfReaderState,
     pdfDocument: StableHolder<ReaderDocument>,
+    documentKey: String,
     activeTheme: com.aryan.reader.ReaderTheme,
     activeTextureAlpha: Float = 0.55f,
     excludeImages: Boolean = false,
@@ -230,6 +286,7 @@ internal fun PdfVerticalReader(
     selectedTool: InkType,
     richTextController: RichTextController? = null,
     textBoxes: List<PdfTextBox> = emptyList(),
+    textBoxesByPage: Map<Int, List<PdfTextBox>> = emptyMap(),
     selectedTextBoxId: String? = null,
     onTextBoxChange: (PdfTextBox) -> Unit = {},
     onTextBoxSelect: (String) -> Unit = {},
@@ -245,6 +302,7 @@ internal fun PdfVerticalReader(
     stylusButtonHovering: Boolean = false,
     isHighlighterSnapEnabled: Boolean = false,
     userHighlights: List<PdfUserHighlight> = emptyList(),
+    userHighlightsByPage: Map<Int, List<PdfUserHighlight>> = emptyMap(),
     onHighlightAdd: (Int, Pair<Int, Int>, String, PdfHighlightColor) -> Unit = { _,_,_,_ -> },
     onHighlightUpdate: (String, PdfHighlightColor) -> Unit = { _,_ -> },
     onHighlightDelete: (String) -> Unit = {},
@@ -258,9 +316,10 @@ internal fun PdfVerticalReader(
     onZoomAndPanChanged: ((Float, Offset) -> Unit)? = null,
     resetZoomTrigger: Long = 0L,
     isBubbleZoomModeActive: Boolean = false,
+    showPageGap: Boolean = true,
+    showPageNumberOverlay: Boolean = true,
     onDetectBubbles: suspend (Int, Bitmap) -> List<SpeechBubble> = { _, _ -> emptyList() }
 ) {
-    SideEffect { Timber.tag("PdfDrawPerf").v("LIST: PdfVerticalReader Recomposing.") }
     DisposableEffect(state) {
         onDispose {
             state.scrollToPageHandler = null
@@ -273,6 +332,13 @@ internal fun PdfVerticalReader(
     var globalEraserPosition by remember { mutableStateOf<Offset?>(null) }
     var isStylusEraserOverride by remember { mutableStateOf(false) }
     val isDarkMode = activeTheme.isDark || activeTheme.id == "reverse"
+    val verticalPageBackgroundColor = remember(activeTheme) {
+        when (activeTheme.id) {
+            "no_theme", "system" -> Color.White
+            "reverse" -> Color.Black
+            else -> activeTheme.backgroundColor
+        }
+    }
     BoxWithConstraints(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopStart) {
         val imeInsets = WindowInsets.ime
         val density = LocalDensity.current
@@ -282,6 +348,12 @@ internal fun PdfVerticalReader(
 
         val ratios = pageAspectRatios.item
         val bookmarkSet = bookmarks.item
+        val effectiveTextBoxesByPage = remember(textBoxes, textBoxesByPage) {
+            textBoxesByPage.ifEmpty { textBoxes.groupBy { it.pageIndex } }
+        }
+        val effectiveUserHighlightsByPage = remember(userHighlights, userHighlightsByPage) {
+            userHighlightsByPage.ifEmpty { userHighlights.groupBy { it.pageIndex } }
+        }
 
         val scope = rememberCoroutineScope()
 
@@ -294,56 +366,37 @@ internal fun PdfVerticalReader(
         val headerHeightPx = with(density) { headerHeight.toPx() }
         val footerHeightPx = with(density) { footerHeight.toPx() }
 
-        val dividerHeightDp = 8.dp
+        val dividerHeightDp = pdfVerticalPageGapDp(showPageGap, 8.dp)
         val dividerHeightPx = with(density) { dividerHeightDp.toPx() }
+        val dividerHeightPxInt = dividerHeightPx.roundToInt().coerceAtLeast(0)
 
         var isFlinging by remember { mutableStateOf(false) }
         var isFastFlinging by remember { mutableStateOf(false) }
         var isInteracting by remember { mutableStateOf(false) }
         var isDragging by remember { mutableStateOf(false) }
 
-        val layoutState = remember(ratios, screenWidth, screenHeight, density) {
+        val layoutState = remember(ratios, constraints.maxWidth, constraints.maxHeight, density, showPageGap, dividerHeightPxInt) {
             data class LayoutResult(val pages: List<PdfPageLayout>, val totalHeight: Float)
 
-            var currentY = 0.0
+            val verticalLayout = calculatePdfVerticalPageLayoutPx(
+                pageAspectRatios = ratios,
+                viewportWidthPx = constraints.maxWidth,
+                viewportHeightPx = constraints.maxHeight,
+                pageGapPx = dividerHeightPxInt
+            )
 
-            if (ratios.size == 1) {
-                val ratio = ratios[0]
-                val safeRatio = if (ratio <= 0f) 1f else ratio
-                val pageHeight = screenWidth / safeRatio
-                if (pageHeight < screenHeight) {
-                    currentY = ((screenHeight - pageHeight) / 2f).toDouble()
-                }
+            val pages = verticalLayout.pages.map { page ->
+                PdfPageLayout(
+                    index = page.pageIndex,
+                    yPx = page.topPx,
+                    heightPx = page.heightPx,
+                    widthPx = page.widthPx,
+                    widthDp = with(density) { page.widthPx.toDp() },
+                    heightDp = with(density) { page.heightPx.toDp() }
+                )
             }
 
-            val pages = ratios.mapIndexed { index, ratio ->
-                val safeRatio = if (ratio <= 0f) 1f else ratio
-                val pageHeightDouble = screenWidth.toDouble() / safeRatio.toDouble()
-                val pageHeight = pageHeightDouble.toFloat()
-
-                val info = PdfPageLayout(
-                    index = index,
-                    y = currentY.toFloat(),
-                    height = pageHeight,
-                    width = screenWidth,
-                    widthDp = with(density) { screenWidth.toDp() },
-                    heightDp = with(density) { pageHeight.toDp() })
-
-                currentY += pageHeightDouble
-                if (index < ratios.lastIndex) {
-                    currentY += dividerHeightPx
-                }
-                info
-            }
-
-            val totalH = if (pages.isNotEmpty()) {
-                val last = pages.last()
-                last.y + last.height
-            } else {
-                0f
-            }
-
-            LayoutResult(pages, totalH)
+            LayoutResult(pages, verticalLayout.totalHeightPx.toFloat())
         }
 
         val layoutInfo = layoutState.pages
@@ -375,11 +428,17 @@ internal fun PdfVerticalReader(
         var isResizing by remember { mutableStateOf(false) }
         var previousScreenWidth by remember { mutableFloatStateOf(0f) }
         var previousScreenHeight by remember { mutableFloatStateOf(0f) }
+        var lockedOrientationChangedDuringResize by remember { mutableStateOf(false) }
         val targetPageDuringResize = remember { mutableIntStateOf(-1) }
 
         if (previousScreenWidth != screenWidth || previousScreenHeight != screenHeight) {
             if (previousScreenWidth > 0f) {
+                val previousWasLandscape = previousScreenWidth > previousScreenHeight
+                val currentIsLandscape = screenWidth > screenHeight
                 isResizing = true
+                if (isScrollLocked && previousWasLandscape != currentIsLandscape) {
+                    lockedOrientationChangedDuringResize = true
+                }
                 if (targetPageDuringResize.intValue == -1) {
                     targetPageDuringResize.intValue = state.currentPage
                 }
@@ -424,7 +483,45 @@ internal fun PdfVerticalReader(
         }
 
         LaunchedEffect(layoutState.pages) {
-            if (!isInitialLayout && !isScrollLocked) {
+            if (!isInitialLayout && isScrollLocked && lockedOrientationChangedDuringResize) {
+                val targetPageIdx = if (targetPageDuringResize.intValue != -1) {
+                    targetPageDuringResize.intValue
+                } else {
+                    state.currentPage
+                }
+
+                val newLayout = layoutState.pages
+                val pageLayout = newLayout.getOrNull(targetPageIdx)
+
+                if (pageLayout != null) {
+                    val resetCamera = calculateLockedOrientationResetCamera(
+                        pageTopY = pageLayout.y,
+                        totalDocHeight = layoutState.totalHeight,
+                        screenWidth = screenWidth,
+                        screenHeight = screenHeight,
+                        headerHeightPx = headerHeightPx,
+                        footerHeightPx = footerHeightPx,
+                        fitZoom = fitZoom
+                    )
+
+                    panXAnimatable.updateBounds(null, null)
+                    panYAnimatable.updateBounds(null, null)
+
+                    coroutineScope {
+                        launch { zoomAnimatable.snapTo(resetCamera.zoom) }
+                        launch { panXAnimatable.snapTo(resetCamera.panX) }
+                        launch { panYAnimatable.snapTo(resetCamera.panY) }
+                    }
+
+                    state.currentPage = targetPageIdx
+                    hasRestoredLockedState = true
+                    onZoomChange(resetCamera.zoom)
+                    onZoomAndPanChanged?.invoke(resetCamera.zoom, Offset(resetCamera.panX, resetCamera.panY))
+                    Timber.tag("PdfLockDiagnostic").i(
+                        "Orientation changed while locked; reset zoom to fit and kept page $targetPageIdx"
+                    )
+                }
+            } else if (!isInitialLayout && !isScrollLocked) {
                 val targetPageIdx = if (targetPageDuringResize.intValue != -1) {
                     targetPageDuringResize.intValue
                 } else {
@@ -466,6 +563,7 @@ internal fun PdfVerticalReader(
             if (!isInitialLayout) {
                 delay(50)
                 isResizing = false
+                lockedOrientationChangedDuringResize = false
                 targetPageDuringResize.intValue = -1
             }
             isInitialLayout = false
@@ -1080,8 +1178,9 @@ internal fun PdfVerticalReader(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .background(if (showPageGap) Color.Transparent else verticalPageBackgroundColor)
                 .then(globalDrawingModifier)
-                .pointerInput(isEditMode, selectedTool, isStylusOnlyMode) {
+                .pointerInput(isEditMode, selectedTool, isStylusOnlyMode, isScrollLocked) {
                     Timber.tag("PdfTouchDebug").v(
                         "VerticalReader: TapPointerInput init. isEditMode=$isEditMode"
                     )
@@ -1101,8 +1200,10 @@ internal fun PdfVerticalReader(
                             onPageClick()
                         }
                     }, onDoubleTap = { offset ->
-                        Timber.tag("PdfTouchDebug").d("VerticalReader: DoubleTap detected")
-                        onDoubleTapToZoom(offset)
+                        if (!isScrollLocked) {
+                            Timber.tag("PdfTouchDebug").d("VerticalReader: DoubleTap detected")
+                            onDoubleTapToZoom(offset)
+                        }
                     })
                 }
                 .pointerInput(
@@ -1428,11 +1529,16 @@ internal fun PdfVerticalReader(
                         }
 
                     val cached = cachedVisiblePages.value
-                    val indicesMatch = cached.size == finalPages.size && cached.indices.all {
-                        cached[it].index == finalPages[it].index
+                    val layoutMatches = cached.size == finalPages.size && cached.indices.all {
+                        val cachedPage = cached[it]
+                        val newPage = finalPages[it]
+                        cachedPage.index == newPage.index &&
+                            cachedPage.yPx == newPage.yPx &&
+                            cachedPage.heightPx == newPage.heightPx &&
+                            cachedPage.widthPx == newPage.widthPx
                     }
 
-                    if (!indicesMatch) {
+                    if (!layoutMatches) {
                         cachedVisiblePages.value = finalPages
                         Timber.tag("PdfDrawPerf").d(
                             "Vertical Visible Pages Changed: ${finalPages.map { it.index }} (Dragging: ${draggedBox != null})"
@@ -1472,17 +1578,10 @@ internal fun PdfVerticalReader(
             Layout(
                 content = {
                     visiblePages.forEach { page ->
-                        key(page.index) {
+                        key(documentKey, page.index) {
                             val isBookmarked by remember(bookmarkSet, page.index) {
                                 derivedStateOf {
                                     bookmarkSet.any { it.pageIndex == page.index }
-                                }
-                            }
-
-                            SideEffect {
-                                if (page.index == state.currentPage) {
-                                    Timber.tag("PdfDrawPerf")
-                                        .v("VERTICAL READER: Emitting Page ${page.index}")
                                 }
                             }
 
@@ -1579,6 +1678,7 @@ internal fun PdfVerticalReader(
                                 { text: String -> onSearchText(text) }
                             }
 
+                            val currentOnDoubleTapToZoom by rememberUpdatedState(onDoubleTapToZoom)
                             val onDoubleTapLambda = remember(page, screenWidth, screenHeight) {
                                 { localOffset: Offset ->
                                     Timber.tag("PdfZoomDebug").d(
@@ -1592,7 +1692,7 @@ internal fun PdfVerticalReader(
                                     val screenX = contentX * currentZ + panX
                                     val screenY = contentY * currentZ + panY
                                     Timber.tag("PdfZoomDebug").d("Mapped to Screen: ($screenX, $screenY)") // Added log
-                                    onDoubleTapToZoom(Offset(screenX, screenY))
+                                    currentOnDoubleTapToZoom(Offset(screenX, screenY))
                                 }
                             }
 
@@ -1661,32 +1761,10 @@ internal fun PdfVerticalReader(
 
                             Box(modifier = Modifier
                                 .layoutId(page)
-                                .graphicsLayer {
-                                    val z = zoomAnimatable.value
-                                    val px = panXAnimatable.value
-                                    val py = panYAnimatable.value
-
-                                    scaleX = z
-                                    scaleY = z
-                                    translationX = px
-                                    translationY = page.y * (z - 1f) + py
-                                    transformOrigin = TransformOrigin(0f, 0f)
-
-                                    if (page.index < 2 && z > 1.1f) {
-                                        Timber.tag("PdfZoomDebug").v("Page ${page.index} Render: TransY=$translationY (PageY=${page.y}, GlobalY=${page.y + translationY})")
-                                    }
-                                }
-                                .clipToBounds()
-                                .onGloballyPositioned { coordinates ->
-                                    if (page.index == 0) {
-                                        val pos = coordinates.positionInWindow()
-                                        Timber.d(
-                                            "Page 0 Box | GlobalPos: $pos | Size: ${coordinates.size} | PageY: ${page.y}"
-                                        )
-                                    }
-                                }) {
+                            ) {
                                 PdfPageComposable(
                                     pdfDocument = pdfDocument,
+                                    documentKey = documentKey,
                                     pageIndex = page.index,
                                     virtualPage = virtualPage,
                                     totalPages = totalPages,
@@ -1716,6 +1794,8 @@ internal fun PdfVerticalReader(
                                     isZoomEnabled = false,
                                     isScrolling = isDragging || (isFlinging && isFastFlinging),
                                     isVerticalScroll = true,
+                                    showPageNumberOverlay = showPageNumberOverlay,
+                                    isScrollLocked = isScrollLocked,
                                     visualScaleProvider = currentScaleProvider,
                                     onDoubleTap = onDoubleTapLambda,
                                     clearSelectionTrigger = selectionClearTrigger,
@@ -1734,11 +1814,11 @@ internal fun PdfVerticalReader(
                                     isStylusOnlyMode = isStylusOnlyMode,
                                     stylusButtonHovering = stylusButtonHovering,
                                     isAutoScrollPlaying = isAutoScrollPlaying,
-                                    textBoxes = textBoxes.filter { it.pageIndex == page.index },
+                                    textBoxes = effectiveTextBoxesByPage[page.index].orEmpty(),
                                     selectedTextBoxId = selectedTextBoxId,
                                     onTextBoxChange = onTextBoxChange,
                                     onTextBoxSelect = onTextBoxSelect,
-                                    userHighlights = userHighlights.filter { it.pageIndex == page.index },
+                                    userHighlights = effectiveUserHighlightsByPage[page.index].orEmpty(),
                                     onHighlightAdd = onHighlightAdd,
                                     onHighlightUpdate = onHighlightUpdate,
                                     onHighlightDelete = onHighlightDelete,
@@ -1852,26 +1932,17 @@ internal fun PdfVerticalReader(
                                 )
                             }
 
-                            if (page.index < totalPages - 1) {
-                                val dividerY = page.y + page.height
+                            if (page.index < totalPages - 1 && dividerHeightPxInt > 0) {
+                                val dividerYPx = page.yPx + page.heightPx
                                 Box(
                                     modifier = Modifier
                                         .layoutId(
                                             DividerLayout(
-                                                dividerY, page.width, dividerHeightPx
+                                                yPx = dividerYPx,
+                                                widthPx = page.widthPx,
+                                                heightPx = dividerHeightPxInt
                                             )
                                         )
-                                        .graphicsLayer {
-                                            val z = zoomAnimatable.value
-                                            val px = panXAnimatable.value
-                                            val py = panYAnimatable.value
-
-                                            scaleX = z
-                                            scaleY = z
-                                            translationX = px
-                                            translationY = dividerY * (z - 1f) + py
-                                            transformOrigin = TransformOrigin(0f, 0f)
-                                        }
                                         .background(
                                             MaterialTheme.colorScheme.surfaceVariant
                                         ))
@@ -1881,6 +1952,15 @@ internal fun PdfVerticalReader(
                 },
                 modifier = Modifier
                     .fillMaxSize()
+                    .graphicsLayer {
+                        val z = zoomAnimatable.value
+
+                        scaleX = z
+                        scaleY = z
+                        translationX = panXAnimatable.value
+                        translationY = panYAnimatable.value
+                        transformOrigin = TransformOrigin(0f, 0f)
+                    }
                     .onGloballyPositioned { _ -> }) { measurables, constraints ->
                 val layoutStart = System.nanoTime()
                 Timber.tag("PdfDrawPerf")
@@ -1891,19 +1971,19 @@ internal fun PdfVerticalReader(
                             is PdfPageLayout -> {
                                 val placeable = measurable.measure(
                                     Constraints.fixed(
-                                        id.width.roundToInt(), id.height.roundToInt()
+                                        id.widthPx, id.heightPx
                                     )
                                 )
-                                placeable.place(0, id.y.roundToInt())
+                                placeable.place(0, id.yPx)
                             }
 
                             is DividerLayout -> {
                                 val placeable = measurable.measure(
                                     Constraints.fixed(
-                                        id.width.roundToInt(), id.height.roundToInt()
+                                        id.widthPx, id.heightPx
                                     )
                                 )
-                                placeable.place(0, id.y.roundToInt())
+                                placeable.place(0, id.yPx)
                             }
                         }
                     }

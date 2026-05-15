@@ -35,6 +35,7 @@ class SharedLibraryStateProjector(
     fun project(input: SharedLibraryProjectionInput): SharedReaderScreenState {
         val current = input.state
         val allLibraryBooks = input.booksFromStore
+        val syncedFolders = current.syncedFolders.withSourceFolderFallbacks(allLibraryBooks)
         val queried = filterBySearch(allLibraryBooks, current.searchQuery)
         val filtered = applyLibraryFilters(queried, current.libraryFilters)
         val sortedLibraryBooks = sortBooks(filtered, current.sortOrder)
@@ -54,7 +55,7 @@ class SharedLibraryStateProjector(
             shelfRefs = input.shelfRefs,
             tags = input.tags,
             sortOrder = current.sortOrder,
-            syncedFolders = current.syncedFolders
+            syncedFolders = syncedFolders
         )
         val validShelfIds = shelfProjection.shelves.mapTo(mutableSetOf()) { it.id }
         val viewingShelfId = current.viewingShelfId?.takeIf { it in validShelfIds }
@@ -89,7 +90,8 @@ class SharedLibraryStateProjector(
             openTabIds = openTabIds,
             activeTabBookId = activeTabBookId,
             booksAvailableForAdding = booksAvailableForAdding,
-            allTags = input.tags
+            allTags = input.tags,
+            syncedFolders = syncedFolders
         )
     }
 
@@ -252,6 +254,21 @@ class SharedLibraryStateProjector(
     )
 }
 
+private fun List<SyncedFolder>.withSourceFolderFallbacks(books: List<BookItem>): List<SyncedFolder> {
+    val knownFolders = mapTo(linkedSetOf()) { it.uriString }
+    val missingFolders = books
+        .mapNotNull { it.sourceFolder?.takeIf(String::isNotBlank) }
+        .filterTo(linkedSetOf()) { knownFolders.add(it) }
+        .map { sourceFolder ->
+            SyncedFolder(
+                uriString = sourceFolder,
+                name = sourceFolder.folderDisplayName(),
+                lastScanTime = 0L
+            )
+        }
+    return if (missingFolders.isEmpty()) this else this + missingFolders
+}
+
 private fun String.folderDisplayName(): String {
     return replace('\\', '/').trimEnd('/').substringAfterLast('/').ifBlank { "Local Folder" }
 }
@@ -303,41 +320,22 @@ fun SharedReaderScreenState.withImportedFiles(
     now: Long = currentTimestamp()
 ): SharedReaderScreenState {
     if (files.isEmpty()) return this
-    val existingIds = rawLibraryBooks.mapTo(mutableSetOf()) { it.id }
-    val imported = files.mapIndexedNotNull { index, file ->
-        val id = file.localPath ?: file.uriString ?: file.name
-        if (!existingIds.add(id)) {
-            null
-        } else {
-            BookItem(
-                id = id,
-                path = file.localPath ?: file.uriString,
-                type = file.name.toFileType(),
-                displayName = file.name,
-                timestamp = now + index,
-                title = file.name.substringBeforeLast('.'),
-                fileSize = file.size,
-                sourceFolder = file.sourceFolder ?: file.localPath?.parentPath(),
-                isRecent = false
-            )
-        }
-    }
+    val plan = SharedImportPlanner.plan(
+        files = files,
+        existingBookIds = rawLibraryBooks.mapTo(mutableSetOf()) { it.id },
+        platform = ReaderPlatform.DESKTOP,
+        nowMillis = now
+    )
     return copy(
-        rawLibraryBooks = imported + rawLibraryBooks,
+        rawLibraryBooks = plan.importedBooks + rawLibraryBooks,
         bannerMessage = BannerMessage(
-            if (imported.isEmpty()) {
-                "Those files are already in the library."
-            } else {
-                "Imported ${imported.size} file(s)."
+            when {
+                plan.importedCount > 0 -> "Imported ${plan.importedCount} file(s)."
+                plan.unsupportedCount > 0 -> "No supported files were imported."
+                else -> "Those files are already in the library."
             }
         )
     )
-}
-
-private fun String.parentPath(): String? {
-    val normalized = replace('\\', '/')
-    val parent = normalized.substringBeforeLast('/', missingDelimiterValue = "")
-    return parent.ifBlank { null }
 }
 
 private fun List<BookItem>.withPinnedFirst(pinnedBookIds: Set<String>): List<BookItem> {

@@ -4,6 +4,9 @@ import com.aryan.reader.shared.BookItem
 import com.aryan.reader.shared.FileType
 import com.aryan.reader.shared.LibraryFilters
 import com.aryan.reader.shared.ReadStatusFilter
+import com.aryan.reader.shared.ReaderPlatform
+import com.aryan.reader.shared.SharedFeaturePolicy
+import com.aryan.reader.shared.SharedFileCapabilities
 import com.aryan.reader.shared.SharedReaderScreenState
 import com.aryan.reader.shared.ShelfType
 import com.aryan.reader.shared.isOpdsStream
@@ -26,43 +29,48 @@ enum class SharedAppToolAction {
 data class SharedAppShellModel(
     val primaryTabs: List<SharedAppTab>,
     val selectedPrimaryTab: SharedAppTab,
-    val toolActions: List<SharedAppToolAction>
+    val toolActions: List<SharedAppToolAction>,
+    val showPrimaryNavigation: Boolean
 )
 
 fun sharedAppShellModel(
     selectedTab: SharedAppTab,
-    aiSettingsAvailable: Boolean
+    aiSettingsAvailable: Boolean,
+    featurePolicy: SharedFeaturePolicy = SharedFeaturePolicy.Standard
 ): SharedAppShellModel {
-    val primaryTabs = listOf(
-        SharedAppTab.HOME,
-        SharedAppTab.LIBRARY,
-        SharedAppTab.CATALOGS,
-        SharedAppTab.READER
-    )
+    val primaryTabs = buildList {
+        add(SharedAppTab.HOME)
+        add(SharedAppTab.LIBRARY)
+        if (featurePolicy.opdsCatalogs) add(SharedAppTab.CATALOGS)
+    }
     val selectedPrimaryTab = when (selectedTab) {
         SharedAppTab.SHELVES -> SharedAppTab.LIBRARY
+        SharedAppTab.SETTINGS,
         SharedAppTab.CUSTOM_FONTS,
         SharedAppTab.SUPPORT,
         SharedAppTab.FEEDBACK,
         SharedAppTab.ABOUT -> SharedAppTab.HOME
         else -> selectedTab
-    }
+    }.takeIf { it in primaryTabs } ?: SharedAppTab.HOME
     val toolActions = buildList {
         add(SharedAppToolAction.IMPORT_FILES)
         add(SharedAppToolAction.IMPORT_FOLDER)
         add(SharedAppToolAction.SYNC)
         add(SharedAppToolAction.APP_THEME)
-        if (aiSettingsAvailable) add(SharedAppToolAction.AI_SETTINGS)
+        if (aiSettingsAvailable && featurePolicy.aiAndCloud) add(SharedAppToolAction.AI_SETTINGS)
         add(SharedAppToolAction.CUSTOM_FONTS)
-        add(SharedAppToolAction.HELP_FEEDBACK)
-        add(SharedAppToolAction.SUPPORT)
+        if (featurePolicy.projectLinks) {
+            add(SharedAppToolAction.HELP_FEEDBACK)
+            add(SharedAppToolAction.SUPPORT)
+        }
         add(SharedAppToolAction.ABOUT)
         add(SharedAppToolAction.TABS_TOGGLE)
     }
     return SharedAppShellModel(
         primaryTabs = primaryTabs,
         selectedPrimaryTab = selectedPrimaryTab,
-        toolActions = toolActions
+        toolActions = toolActions,
+        showPrimaryNavigation = selectedTab != SharedAppTab.READER
     )
 }
 
@@ -114,6 +122,50 @@ data class NonReaderLibraryOrganizationModel(
     val hasInAppBooks: Boolean,
     val hasOpdsStreams: Boolean
 )
+
+internal data class NonReaderLibraryFileTypeGroup(
+    val title: String,
+    val fileTypes: List<FileType>
+)
+
+private val LibraryFileTypeGroupTemplates = listOf(
+    NonReaderLibraryFileTypeGroup(
+        title = "Books",
+        fileTypes = listOf(FileType.EPUB, FileType.MOBI, FileType.FB2)
+    ),
+    NonReaderLibraryFileTypeGroup(
+        title = "Documents",
+        fileTypes = listOf(FileType.PDF, FileType.PPTX, FileType.DOCX, FileType.ODT, FileType.FODT)
+    ),
+    NonReaderLibraryFileTypeGroup(
+        title = "Text and web",
+        fileTypes = listOf(FileType.MD, FileType.TXT, FileType.HTML)
+    ),
+    NonReaderLibraryFileTypeGroup(
+        title = "Comics",
+        fileTypes = listOf(FileType.CBZ, FileType.CBR, FileType.CB7)
+    )
+)
+
+internal fun nonReaderLibraryFileTypeGroups(
+    platform: ReaderPlatform = ReaderPlatform.DESKTOP
+): List<NonReaderLibraryFileTypeGroup> {
+    val readableTypes = SharedFileCapabilities.readableTypesFor(platform)
+    val knownGroupedTypes = LibraryFileTypeGroupTemplates.flatMapTo(mutableSetOf()) { it.fileTypes }
+    val grouped = LibraryFileTypeGroupTemplates.mapNotNull { group ->
+        val visibleTypes = group.fileTypes.filter { it in readableTypes }
+        group.copy(fileTypes = visibleTypes).takeIf { visibleTypes.isNotEmpty() }
+    }
+    val otherTypes = readableTypes
+        .filterNot { it in knownGroupedTypes }
+        .sortedBy { it.ordinal }
+
+    return if (otherTypes.isEmpty()) {
+        grouped
+    } else {
+        grouped + NonReaderLibraryFileTypeGroup("Other", otherTypes)
+    }
+}
 
 fun SharedReaderScreenState.toNonReaderLibraryOrganizationModel(): NonReaderLibraryOrganizationModel {
     val books = rawLibraryBooks

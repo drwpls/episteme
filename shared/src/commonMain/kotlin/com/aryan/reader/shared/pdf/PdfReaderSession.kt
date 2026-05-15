@@ -144,17 +144,45 @@ data class SharedPdfJumpHistory(
     }
 }
 
+data class SharedPdfReaderViewport(
+    val pageIndex: Int = 0,
+    val displayMode: PdfDisplayMode = PdfDisplayMode.PAGINATION,
+    val zoom: Float = PdfZoomSpec().default,
+    val horizontalScrollOffset: Int = 0,
+    val paginatedVerticalScrollOffset: Int = 0,
+    val verticalFirstPageIndex: Int = pageIndex,
+    val verticalFirstPageScrollOffset: Int = 0
+) {
+    fun sanitized(
+        pageCount: Int,
+        zoomSpec: PdfZoomSpec = PdfZoomSpec()
+    ): SharedPdfReaderViewport {
+        val lastPageIndex = (pageCount.coerceAtLeast(0) - 1).coerceAtLeast(0)
+        val safeZoom = if (zoom.isFinite() && zoom > 0f) zoom else zoomSpec.default
+        return copy(
+            pageIndex = pageIndex.coerceIn(0, lastPageIndex),
+            zoom = zoomSpec.clamp(safeZoom),
+            horizontalScrollOffset = horizontalScrollOffset.coerceAtLeast(0),
+            paginatedVerticalScrollOffset = paginatedVerticalScrollOffset.coerceAtLeast(0),
+            verticalFirstPageIndex = verticalFirstPageIndex.coerceIn(0, lastPageIndex),
+            verticalFirstPageScrollOffset = verticalFirstPageScrollOffset.coerceAtLeast(0)
+        )
+    }
+}
+
 data class SharedPdfReaderState(
     val pageIndex: Int = 0,
     val pageCount: Int = 0,
     val displayMode: PdfDisplayMode = PdfDisplayMode.PAGINATION,
     val zoom: Float = PdfZoomSpec().default,
+    val isSearchActive: Boolean = false,
+    val showSearchResultsPanel: Boolean = true,
     val searchQuery: String = "",
     val activeSearchResultIndex: Int = -1,
     val searchHighlightMode: SearchHighlightMode = SearchHighlightMode.ALL,
-    val selectedTool: PdfInkTool = PdfInkTool.PEN,
-    val selectedColorArgb: Int = SharedPdfAnnotationDefaults.configFor(PdfInkTool.PEN).colorArgb,
-    val strokeWidth: Float = SharedPdfAnnotationDefaults.configFor(PdfInkTool.PEN).strokeWidth,
+    val selectedTool: PdfInkTool = PdfInkTool.NONE,
+    val selectedColorArgb: Int = SharedPdfAnnotationDefaults.configFor(PdfInkTool.NONE).colorArgb,
+    val strokeWidth: Float = SharedPdfAnnotationDefaults.configFor(PdfInkTool.NONE).strokeWidth,
     val isTextSelectionMode: Boolean = false,
     val bookmarks: List<SharedPdfBookmark> = emptyList(),
     val selectedAnnotationId: String? = null,
@@ -208,6 +236,9 @@ sealed interface SharedPdfReaderAction {
     data class ZoomChanged(val zoom: Float) : SharedPdfReaderAction
     data class ZoomBy(val delta: Float) : SharedPdfReaderAction
     data class SearchChanged(val query: String) : SharedPdfReaderAction
+    data object SearchOpened : SharedPdfReaderAction
+    data object SearchClosed : SharedPdfReaderAction
+    data object SearchResultsPanelToggled : SharedPdfReaderAction
     data class SearchHighlightModeChanged(val mode: SearchHighlightMode) : SharedPdfReaderAction
     data object SearchHighlightModeToggled : SharedPdfReaderAction
     data class GoToSearchResult(
@@ -257,10 +288,26 @@ fun SharedPdfReaderState.reduce(
         )
         is SharedPdfReaderAction.ZoomChanged -> copy(zoom = zoomSpec.clamp(action.zoom))
         is SharedPdfReaderAction.ZoomBy -> copy(zoom = zoomSpec.clamp(zoom + action.delta))
-        is SharedPdfReaderAction.SearchChanged -> copy(
-            searchQuery = action.query,
+        is SharedPdfReaderAction.SearchChanged -> {
+            val normalized = action.query.trim()
+            copy(
+                isSearchActive = isSearchActive || normalized.isNotBlank(),
+                showSearchResultsPanel = showSearchResultsPanel || normalized.isNotBlank(),
+                searchQuery = action.query,
+                activeSearchResultIndex = -1
+            )
+        }
+        SharedPdfReaderAction.SearchOpened -> copy(
+            isSearchActive = true,
+            showSearchResultsPanel = true
+        )
+        SharedPdfReaderAction.SearchClosed -> copy(
+            isSearchActive = false,
+            showSearchResultsPanel = true,
+            searchQuery = "",
             activeSearchResultIndex = -1
         )
+        SharedPdfReaderAction.SearchResultsPanelToggled -> copy(showSearchResultsPanel = !showSearchResultsPanel)
         is SharedPdfReaderAction.SearchHighlightModeChanged -> copy(searchHighlightMode = action.mode)
         SharedPdfReaderAction.SearchHighlightModeToggled -> copy(
             searchHighlightMode = when (searchHighlightMode) {
@@ -284,12 +331,25 @@ fun SharedPdfReaderState.reduce(
             copy(
                 selectedTool = action.tool,
                 selectedColorArgb = config.colorArgb,
-                strokeWidth = config.strokeWidth
+                strokeWidth = config.strokeWidth,
+                isTextSelectionMode = false
             )
         }
         is SharedPdfReaderAction.ColorSelected -> copy(selectedColorArgb = action.colorArgb)
         is SharedPdfReaderAction.StrokeWidthChanged -> copy(strokeWidth = action.strokeWidth.coerceAtLeast(0.0001f))
-        is SharedPdfReaderAction.TextSelectionModeChanged -> copy(isTextSelectionMode = action.enabled)
+        is SharedPdfReaderAction.TextSelectionModeChanged -> {
+            if (action.enabled) {
+                val config = SharedPdfAnnotationDefaults.configFor(PdfInkTool.NONE)
+                copy(
+                    isTextSelectionMode = true,
+                    selectedTool = PdfInkTool.NONE,
+                    selectedColorArgb = config.colorArgb,
+                    strokeWidth = config.strokeWidth
+                )
+            } else {
+                copy(isTextSelectionMode = false)
+            }
+        }
         is SharedPdfReaderAction.BookmarksLoaded -> copy(bookmarks = action.bookmarks.normalizedBookmarks(lastPageIndex))
         is SharedPdfReaderAction.BookmarkToggled -> {
             val page = action.pageIndex.coerceIn(0, lastPageIndex)

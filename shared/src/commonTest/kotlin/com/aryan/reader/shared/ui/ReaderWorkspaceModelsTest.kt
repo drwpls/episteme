@@ -8,7 +8,8 @@ import com.aryan.reader.shared.ReaderTool
 import com.aryan.reader.shared.ReaderToolbarPreferences
 import com.aryan.reader.shared.pdf.SharedPdfReaderState
 import com.aryan.reader.shared.reader.ReaderEngine
-import com.aryan.reader.shared.reader.SampleReaderBooks
+import com.aryan.reader.shared.reader.SharedEpubBook
+import com.aryan.reader.shared.reader.SharedEpubChapter
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -18,10 +19,10 @@ import kotlin.test.assertTrue
 class ReaderWorkspaceModelsTest {
 
     @Test
-    fun `epub workspace maps shared toolbar preferences to reader sidebars and inspector`() {
-        val session = ReaderEngine().createSession(SampleReaderBooks.desktopWelcomeBook())
+    fun `epub workspace maps shared toolbar preferences without toolbar tab`() {
+        val session = ReaderEngine().createSession(readerFixtureBook())
         val preferences = ReaderToolbarPreferences(
-            hiddenToolIds = setOf(ReaderTool.THEME.id, ReaderTool.FORMAT.id),
+            hiddenToolIds = setOf(ReaderTool.THEME.id, ReaderTool.FORMAT.id, ReaderTool.BOOKMARK.id),
             bottomToolIds = setOf(ReaderTool.SLIDER.id, ReaderTool.SEARCH.id)
         )
 
@@ -33,21 +34,32 @@ class ReaderWorkspaceModelsTest {
         )
 
         assertEquals(ReaderWorkspaceKind.EPUB, model.kind)
-        assertTrue(ReaderWorkspaceLeftSection.CONTENTS in model.leftSections)
-        assertTrue(ReaderWorkspaceLeftSection.SEARCH in model.leftSections)
-        assertTrue(ReaderWorkspaceLeftSection.BOOKMARKS in model.leftSections)
+        assertEquals(
+            listOf(
+                ReaderWorkspaceLeftSection.CONTENTS,
+                ReaderWorkspaceLeftSection.NOTES,
+                ReaderWorkspaceLeftSection.BOOKMARKS
+            ),
+            model.leftSections
+        )
+        assertFalse(ReaderWorkspaceLeftSection.SEARCH in model.leftSections)
+        assertFalse(ReaderWorkspaceTopAction.BOOKMARK in model.topActions)
         assertFalse(ReaderWorkspaceInspectorSection.APPEARANCE in model.inspectorSections)
         assertTrue(ReaderWorkspaceInspectorSection.AI_TTS in model.inspectorSections)
-        assertTrue(ReaderWorkspaceInspectorSection.TOOLBAR in model.inspectorSections)
+        assertFalse(ReaderWorkspaceInspectorSection.TOOLBAR in model.inspectorSections)
         assertTrue(ReaderWorkspaceTopAction.SEARCH in model.topActions)
+        assertTrue(ReaderWorkspaceTopAction.FULL_SCREEN in model.topActions)
         assertTrue(ReaderWorkspaceTopAction.AI in model.topActions)
         assertTrue(ReaderWorkspaceBottomAction.PAGE_SLIDER in model.bottomActions)
+        assertFalse(model.panelDefaults.leftOpen)
+        assertFalse(model.panelDefaults.inspectorOpen)
+        assertFalse(model.chrome.preferAutoHide)
     }
 
     @Test
     fun `chrome model is forced visible for active reader states`() {
         val model = readerWorkspaceChromeModel(
-            preferAutoHide = true,
+            preferAutoHide = false,
             searchActive = true,
             leftPanelOpen = false,
             inspectorOpen = true,
@@ -59,12 +71,54 @@ class ReaderWorkspaceModelsTest {
             ttsBusy = true
         )
 
-        assertTrue(model.preferAutoHide)
+        assertFalse(model.preferAutoHide)
         assertTrue(model.forceVisible)
         assertEquals(
             setOf("search", "inspector", "annotation", "rich-text", "loading", "error", "auto-scroll", "tts"),
             model.forceVisibleReasons
         )
+    }
+
+    @Test
+    fun `epub workspace ignores desktop visual options in inspector`() {
+        val session = ReaderEngine().createSession(readerFixtureBook())
+        val preferences = ReaderToolbarPreferences(
+            hiddenToolIds = ReaderTool.entries
+                .filterNot { it == ReaderTool.VISUAL_OPTIONS }
+                .mapTo(mutableSetOf()) { it.id }
+        )
+
+        val model = epubReaderWorkspaceModel(
+            session = session,
+            toolbarPreferences = preferences,
+            extrasState = ReaderExtrasState(),
+            aiAvailable = true
+        )
+
+        assertFalse(ReaderWorkspaceInspectorSection.TOOLS in model.inspectorSections)
+        assertFalse(ReaderWorkspaceTopAction.TOOLS in model.topActions)
+    }
+
+    @Test
+    fun `epub workspace ignores external lookup in inspector`() {
+        val session = ReaderEngine().createSession(readerFixtureBook())
+        val preferences = ReaderToolbarPreferences(
+            hiddenToolIds = ReaderTool.entries
+                .filterNot { it == ReaderTool.DICTIONARY }
+                .mapTo(mutableSetOf()) { it.id }
+        )
+
+        val model = epubReaderWorkspaceModel(
+            session = session,
+            toolbarPreferences = preferences,
+            extrasState = ReaderExtrasState(),
+            aiAvailable = false,
+            cloudTtsAvailable = false,
+            externalLookupAvailable = true
+        )
+
+        assertFalse(ReaderWorkspaceInspectorSection.AI_TTS in model.inspectorSections)
+        assertFalse(ReaderWorkspaceTopAction.TOOLS in model.topActions)
     }
 
     @Test
@@ -105,6 +159,34 @@ class ReaderWorkspaceModelsTest {
     }
 
     @Test
+    fun `toolbar quick actions hide online tools when unavailable`() {
+        val preferences = ReaderToolbarPreferences(
+            toolOrder = listOf(
+                ReaderTool.DICTIONARY,
+                ReaderTool.SEARCH,
+                ReaderTool.AI_FEATURES,
+                ReaderTool.TTS_CONTROLS
+            ) + ReaderTool.entries,
+            bottomToolIds = setOf(
+                ReaderTool.DICTIONARY.id,
+                ReaderTool.SEARCH.id,
+                ReaderTool.AI_FEATURES.id,
+                ReaderTool.TTS_CONTROLS.id
+            )
+        )
+
+        val tools = readerWorkspaceQuickActionTools(
+            toolbarPreferences = preferences,
+            bottom = true,
+            aiAvailable = false,
+            cloudTtsAvailable = false,
+            externalLookupAvailable = false
+        )
+
+        assertEquals(listOf(ReaderTool.SEARCH), tools)
+    }
+
+    @Test
     fun `pdf workspace defaults to reading first while keeping annotation tools in inspector`() {
         val model = pdfReaderWorkspaceModel(
             state = SharedPdfReaderState.initial(pageCount = 4),
@@ -124,14 +206,26 @@ class ReaderWorkspaceModelsTest {
 
         assertEquals(ReaderWorkspaceKind.PDF, model.kind)
         assertNull(model.defaultPdfInteractionMode)
-        assertTrue(ReaderWorkspaceLeftSection.CONTENTS in model.leftSections)
-        assertTrue(ReaderWorkspaceLeftSection.SEARCH in model.leftSections)
-        assertTrue(ReaderWorkspaceLeftSection.BOOKMARKS in model.leftSections)
-        assertTrue(ReaderWorkspaceLeftSection.NOTES in model.leftSections)
+        assertEquals(
+            listOf(
+                ReaderWorkspaceLeftSection.CONTENTS,
+                ReaderWorkspaceLeftSection.NOTES,
+                ReaderWorkspaceLeftSection.BOOKMARKS,
+                ReaderWorkspaceLeftSection.PAGES
+            ),
+            model.leftSections
+        )
+        assertFalse(ReaderWorkspaceLeftSection.SEARCH in model.leftSections)
         assertTrue(ReaderWorkspaceInspectorSection.APPEARANCE in model.inspectorSections)
         assertTrue(ReaderWorkspaceInspectorSection.TOOLS in model.inspectorSections)
         assertTrue(ReaderWorkspaceInspectorSection.AI_TTS in model.inspectorSections)
+        assertTrue(ReaderWorkspaceInspectorSection.TOOLBAR in model.inspectorSections)
+        assertTrue(ReaderWorkspaceTopAction.BOOKMARK in model.topActions)
+        assertTrue(ReaderWorkspaceTopAction.FULL_SCREEN in model.topActions)
         assertTrue(ReaderWorkspaceTopAction.AI in model.topActions)
+        assertFalse(model.panelDefaults.leftOpen)
+        assertFalse(model.panelDefaults.inspectorOpen)
+        assertFalse(model.chrome.preferAutoHide)
     }
 
     @Test
@@ -156,11 +250,27 @@ class ReaderWorkspaceModelsTest {
         )
 
         assertTrue(model.chrome.forceVisible)
+        assertFalse(model.chrome.preferAutoHide)
         assertTrue("search" in model.chrome.forceVisibleReasons)
         assertTrue("annotation" in model.chrome.forceVisibleReasons)
         assertTrue("error" in model.chrome.forceVisibleReasons)
         assertTrue("auto-scroll" in model.chrome.forceVisibleReasons)
         assertTrue("tts" in model.chrome.forceVisibleReasons)
         assertFalse(ReaderWorkspaceTopAction.AI in model.topActions)
+    }
+
+    private fun readerFixtureBook(): SharedEpubBook {
+        return SharedEpubBook(
+            id = "reader_fixture",
+            fileName = "Reader Fixture.epub",
+            title = "Reader Fixture",
+            chapters = listOf(
+                SharedEpubChapter(
+                    id = "intro",
+                    title = "Intro",
+                    plainText = "A short reader fixture for workspace model tests."
+                )
+            )
+        )
     }
 }

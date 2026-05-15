@@ -11,6 +11,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,8 +41,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Typography
@@ -65,7 +66,9 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,7 +78,13 @@ import com.aryan.reader.shared.AppThemeMode
 import com.aryan.reader.shared.CustomAppTheme
 import com.materialkolor.PaletteStyle
 import com.materialkolor.dynamicColorScheme
+import kotlin.math.PI
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 private val SharedLightColorScheme = lightColorScheme(
@@ -524,7 +533,7 @@ private fun SharedCreateAppThemeDialog(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(18.dp)
             ) {
-                OutlinedTextField(
+                SharedStableOutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("Theme name") },
@@ -616,7 +625,248 @@ private fun SharedCreateAppThemeDialog(
 }
 
 @Composable
-private fun SharedSpectrumBox(
+fun SharedHsvColorPickerDialog(
+    initialColor: Color,
+    title: String,
+    onDismiss: () -> Unit,
+    onSave: (Color) -> Unit,
+    modifier: Modifier = Modifier,
+    preview: @Composable (Color) -> Unit = {}
+) {
+    var hsv by remember(initialColor) { mutableStateOf(initialColor.toSharedHsvColor()) }
+    val color = hsv.toComposeColor()
+
+    fun updateFromColor(nextColor: Color) {
+        hsv = nextColor.toSharedHsvColor()
+    }
+
+    SharedReaderModalLayer(onDismiss = onDismiss) {
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            val dialogHorizontalPadding = 24.dp
+            val dialogAvailableWidth = (maxWidth - dialogHorizontalPadding - dialogHorizontalPadding).coerceAtLeast(0.dp)
+            Surface(
+                modifier = Modifier
+                    .padding(dialogHorizontalPadding)
+                    .width(sharedReaderPopupWidth(dialogAvailableWidth))
+                    .heightIn(max = 600.dp),
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 8.dp,
+                shadowElevation = 16.dp
+            ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    }
+                }
+                Column(
+                    modifier = modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(18.dp)
+                ) {
+                    preview(color)
+
+                    SharedHsvWheel(
+                        hue = hsv.hue,
+                        saturation = hsv.saturation,
+                        currentColor = color,
+                        onHueSatChanged = { hue, saturation ->
+                            hsv = hsv.copy(hue = hue, saturation = saturation)
+                        },
+                        modifier = Modifier.size(240.dp)
+                    )
+
+                    SharedBrightnessSlider(
+                        hue = hsv.hue,
+                        saturation = hsv.saturation,
+                        value = hsv.value,
+                        onValueChanged = { hsv = hsv.copy(value = it) },
+                        modifier = Modifier.fillMaxWidth().height(24.dp).clip(RoundedCornerShape(12.dp))
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        SharedColorComparePill(
+                            oldColor = initialColor,
+                            newColor = color,
+                            modifier = Modifier.width(64.dp).height(36.dp)
+                        )
+
+                        Column(
+                            modifier = Modifier.weight(1.6f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("Hex", color = Color.Gray, fontSize = 12.sp, maxLines = 1)
+                            Spacer(Modifier.height(4.dp))
+                            SharedHexInput(color = color, onHexChanged = { updateFromColor(it) })
+                        }
+
+                        Row(
+                            modifier = Modifier.weight(2.4f),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            SharedRgbInputColumn(
+                                label = "R",
+                                value = color.red,
+                                onValueChange = { updateFromColor(color.copy(red = it)) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            SharedRgbInputColumn(
+                                label = "G",
+                                value = color.green,
+                                onValueChange = { updateFromColor(color.copy(green = it)) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            SharedRgbInputColumn(
+                                label = "B",
+                                value = color.blue,
+                                onValueChange = { updateFromColor(color.copy(blue = it)) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancel")
+                    }
+                    Button(
+                        onClick = { onSave(color) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = color,
+                            contentColor = if (color.luminance() > 0.5f) Color.Black else Color.White
+                        )
+                    ) {
+                        Text("Save", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+        }
+    }
+}
+
+@Composable
+fun SharedHsvWheel(
+    hue: Float,
+    saturation: Float,
+    currentColor: Color,
+    onHueSatChanged: (Float, Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val touchPadding = 12.dp
+
+    Box(
+        modifier = modifier.pointerInput(Unit) {
+            awaitEachGesture {
+                val down = awaitFirstDown()
+                val paddingPx = touchPadding.toPx()
+
+                fun update(offset: Offset) {
+                    val selection = sharedHsvWheelSelection(
+                        offsetX = offset.x,
+                        offsetY = offset.y,
+                        width = size.width.toFloat(),
+                        height = size.height.toFloat(),
+                        paddingPx = paddingPx
+                    )
+                    onHueSatChanged(selection.hue, selection.saturation)
+                }
+
+                update(down.position)
+                drag(down.id) { change ->
+                    change.consume()
+                    update(change.position)
+                }
+            }
+        }
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val paddingPx = touchPadding.toPx()
+            val wheelRadius = ((min(size.width, size.height) - (paddingPx * 2f)) / 2f).coerceAtLeast(1f)
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val topLeft = Offset(center.x - wheelRadius, center.y - wheelRadius)
+            val wheelSize = Size(wheelRadius * 2f, wheelRadius * 2f)
+            val segments = 180
+            val sweep = 360f / segments
+
+            repeat(segments) { index ->
+                val segmentHue = index * sweep
+                drawArc(
+                    brush = Brush.radialGradient(
+                        colors = listOf(Color.White, Color.hsv(segmentHue, 1f, 1f)),
+                        center = center,
+                        radius = wheelRadius
+                    ),
+                    startAngle = segmentHue,
+                    sweepAngle = sweep + 0.8f,
+                    useCenter = true,
+                    topLeft = topLeft,
+                    size = wheelSize
+                )
+            }
+
+            drawCircle(
+                color = Color.Black.copy(alpha = 0.16f),
+                radius = wheelRadius,
+                center = center,
+                style = Stroke(width = 1.dp.toPx())
+            )
+        }
+
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val paddingPx = touchPadding.toPx()
+            val wheelRadius = ((min(size.width, size.height) - (paddingPx * 2f)) / 2f).coerceAtLeast(1f)
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val angle = hue.normalizedHue().toDouble() * PI / 180.0
+            val radius = saturation.coerceIn(0f, 1f) * wheelRadius
+            val pointer = Offset(
+                x = center.x + (cos(angle).toFloat() * radius),
+                y = center.y + (sin(angle).toFloat() * radius)
+            )
+            val pointerRadius = 10.dp.toPx()
+            val strokeWidth = 2.dp.toPx()
+
+            drawCircle(
+                color = Color.Black.copy(alpha = 0.25f),
+                radius = pointerRadius + 1.dp.toPx(),
+                center = Offset(pointer.x, pointer.y + 1.dp.toPx())
+            )
+            drawCircle(
+                color = currentColor.copy(alpha = 1f),
+                radius = pointerRadius,
+                center = pointer
+            )
+            drawCircle(
+                color = Color.White,
+                radius = pointerRadius,
+                center = pointer,
+                style = Stroke(width = strokeWidth)
+            )
+        }
+    }
+}
+
+@Composable
+fun SharedSpectrumBox(
     hue: Float,
     saturation: Float,
     currentColor: Color,
@@ -702,7 +952,7 @@ private fun SharedSpectrumBox(
 }
 
 @Composable
-private fun SharedBrightnessSlider(
+fun SharedBrightnessSlider(
     hue: Float,
     saturation: Float,
     value: Float,
@@ -747,7 +997,7 @@ private fun SharedBrightnessSlider(
 }
 
 @Composable
-private fun SharedRgbInputColumn(
+fun SharedRgbInputColumn(
     label: String,
     value: Float,
     onValueChange: (Float) -> Unit,
@@ -774,13 +1024,17 @@ private fun SharedRgbInput(
     value: Int,
     onValueChange: (Float) -> Unit
 ) {
-    var text by remember(value) { mutableStateOf(value.coerceIn(0, 255).toString()) }
+    var textFieldValue by remember(value) {
+        val text = value.coerceIn(0, 255).toString()
+        mutableStateOf(TextFieldValue(text, TextRange(text.length)))
+    }
 
     BasicTextField(
-        value = text,
-        onValueChange = { newText ->
+        value = textFieldValue,
+        onValueChange = { nextValue ->
+            val newText = nextValue.text
             if (newText.length <= 3 && newText.all { it.isDigit() }) {
-                text = newText
+                textFieldValue = nextValue
                 newText.toIntOrNull()?.let { channel ->
                     onValueChange(channel.coerceIn(0, 255) / 255f)
                 }
@@ -802,12 +1056,14 @@ private fun SharedRgbInput(
 }
 
 @Composable
-private fun SharedHexInput(
+fun SharedHexInput(
     color: Color,
     onHexChanged: (Color) -> Unit
 ) {
     val hexValue = color.toSharedHexString().removePrefix("#")
-    var text by remember(hexValue) { mutableStateOf(hexValue) }
+    var textFieldValue by remember(hexValue) {
+        mutableStateOf(TextFieldValue(hexValue, TextRange(hexValue.length)))
+    }
 
     Row(
         modifier = Modifier
@@ -825,12 +1081,16 @@ private fun SharedHexInput(
             fontWeight = FontWeight.Bold
         )
         BasicTextField(
-            value = text,
-            onValueChange = { newText ->
+            value = textFieldValue,
+            onValueChange = { nextValue ->
+                val newText = nextValue.text
                 if (newText.length <= 6) {
                     val uppercased = newText.uppercase()
                     if (uppercased.all { it.isDigit() || it in 'A'..'F' }) {
-                        text = uppercased
+                        textFieldValue = nextValue.copy(
+                            text = uppercased,
+                            selection = TextRange(nextValue.selection.end.coerceIn(0, uppercased.length))
+                        )
                         if (uppercased.length == 6) {
                             uppercased.toSharedHexColorOrNull()?.let(onHexChanged)
                         }
@@ -852,7 +1112,7 @@ private fun SharedHexInput(
 }
 
 @Composable
-private fun SharedColorComparePill(
+fun SharedColorComparePill(
     oldColor: Color,
     newColor: Color,
     modifier: Modifier = Modifier
@@ -941,6 +1201,27 @@ internal data class SharedHsvColor(
             value.coerceIn(0f, 1f)
         )
     }
+}
+
+internal fun sharedHsvWheelSelection(
+    offsetX: Float,
+    offsetY: Float,
+    width: Float,
+    height: Float,
+    paddingPx: Float = 0f
+): SharedHsvColor {
+    val wheelRadius = ((min(width, height) - (paddingPx * 2f)) / 2f).coerceAtLeast(1f)
+    val centerX = width / 2f
+    val centerY = height / 2f
+    val dx = offsetX - centerX
+    val dy = offsetY - centerY
+    val hue = (atan2(dy.toDouble(), dx.toDouble()) * 180.0 / PI).toFloat().normalizedHue()
+    val saturation = (sqrt(((dx * dx) + (dy * dy)).toDouble()).toFloat() / wheelRadius).coerceIn(0f, 1f)
+    return SharedHsvColor(
+        hue = hue,
+        saturation = saturation,
+        value = 1f
+    )
 }
 
 internal fun Color.toSharedHsvColor(): SharedHsvColor {

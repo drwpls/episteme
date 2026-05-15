@@ -1,5 +1,6 @@
 package com.aryan.reader.shared.pdf
 
+import androidx.compose.ui.unit.dp
 import com.aryan.reader.shared.PdfDisplayMode
 import com.aryan.reader.shared.SearchHighlightMode
 import kotlin.test.Test
@@ -16,6 +17,14 @@ class PdfReaderSessionTest {
         assertEquals(5, state.pageCount)
         assertEquals(100f, state.progressPercent)
         assertTrue(state.canGoPrevious)
+    }
+
+    @Test
+    fun `initial interaction mode is neutral`() {
+        val state = SharedPdfReaderState.initial(pageCount = 1)
+
+        assertEquals(PdfInkTool.NONE, state.selectedTool)
+        assertEquals(false, state.isTextSelectionMode)
     }
 
     @Test
@@ -62,20 +71,70 @@ class PdfReaderSessionTest {
     }
 
     @Test
+    fun `reader viewport clamps zoom pages and scroll offsets`() {
+        val viewport = SharedPdfReaderViewport(
+            pageIndex = 99,
+            displayMode = PdfDisplayMode.VERTICAL_SCROLL,
+            zoom = Float.NaN,
+            horizontalScrollOffset = -10,
+            paginatedVerticalScrollOffset = -20,
+            verticalFirstPageIndex = 40,
+            verticalFirstPageScrollOffset = -30
+        ).sanitized(
+            pageCount = 5,
+            zoomSpec = PdfZoomSpec(min = 0.5f, max = 4f, default = 1.25f)
+        )
+
+        assertEquals(PdfDisplayMode.VERTICAL_SCROLL, viewport.displayMode)
+        assertEquals(4, viewport.pageIndex)
+        assertEquals(4, viewport.verticalFirstPageIndex)
+        assertEquals(1.25f, viewport.zoom)
+        assertEquals(0, viewport.horizontalScrollOffset)
+        assertEquals(0, viewport.paginatedVerticalScrollOffset)
+        assertEquals(0, viewport.verticalFirstPageScrollOffset)
+    }
+
+    @Test
     fun `search query resets active result and result navigation wraps`() {
         val results = listOf(
             SharedPdfSearchResult(pageIndex = 1, preview = "first", matchIndex = 5),
             SharedPdfSearchResult(pageIndex = 3, preview = "second", matchIndex = 7)
         )
 
-        val state = SharedPdfReaderState.initial(pageCount = 5)
+        val changed = SharedPdfReaderState.initial(pageCount = 5)
             .reduce(SharedPdfReaderAction.GoToSearchResult(0, results))
+            .reduce(SharedPdfReaderAction.SearchHighlightModeChanged(SearchHighlightMode.FOCUSED))
             .reduce(SharedPdfReaderAction.SearchChanged("needle"))
+        val state = changed
             .reduce(SharedPdfReaderAction.GoToSearchResult(-1, results))
 
-        assertEquals("needle", state.searchQuery)
+        assertEquals("needle", changed.searchQuery)
+        assertEquals(-1, changed.activeSearchResultIndex)
+        assertEquals(SearchHighlightMode.FOCUSED, changed.searchHighlightMode)
+        assertEquals(1, changed.pageIndex)
         assertEquals(1, state.activeSearchResultIndex)
         assertEquals(3, state.pageIndex)
+    }
+
+    @Test
+    fun `search chrome actions open toggle and close shared state`() {
+        val opened = SharedPdfReaderState.initial(pageCount = 4)
+            .reduce(SharedPdfReaderAction.SearchOpened)
+        val typed = opened.reduce(SharedPdfReaderAction.SearchChanged("alpha"))
+        val hidden = typed.reduce(SharedPdfReaderAction.SearchResultsPanelToggled)
+        val closed = hidden.reduce(SharedPdfReaderAction.SearchClosed)
+
+        assertTrue(opened.isSearchActive)
+        assertTrue(opened.showSearchResultsPanel)
+        assertEquals("alpha", typed.searchQuery)
+        assertTrue(typed.isSearchActive)
+        assertTrue(typed.showSearchResultsPanel)
+        assertEquals(-1, typed.activeSearchResultIndex)
+        assertEquals(false, hidden.showSearchResultsPanel)
+        assertEquals(false, closed.isSearchActive)
+        assertTrue(closed.showSearchResultsPanel)
+        assertEquals("", closed.searchQuery)
+        assertEquals(-1, closed.activeSearchResultIndex)
     }
 
     @Test
@@ -99,6 +158,22 @@ class PdfReaderSessionTest {
         assertEquals(PdfInkTool.HIGHLIGHTER, state.selectedTool)
         assertEquals(config.colorArgb, state.selectedColorArgb)
         assertEquals(config.strokeWidth, state.strokeWidth)
+    }
+
+    @Test
+    fun `text selection markup tools and neutral mode are exclusive`() {
+        val selectingText = SharedPdfReaderState.initial(pageCount = 1)
+            .reduce(SharedPdfReaderAction.ToolSelected(PdfInkTool.PEN))
+            .reduce(SharedPdfReaderAction.TextSelectionModeChanged(true))
+        val addingTextAnnotation = selectingText.reduce(SharedPdfReaderAction.ToolSelected(PdfInkTool.TEXT))
+        val neutral = addingTextAnnotation.reduce(SharedPdfReaderAction.ToolSelected(PdfInkTool.NONE))
+
+        assertEquals(true, selectingText.isTextSelectionMode)
+        assertEquals(PdfInkTool.NONE, selectingText.selectedTool)
+        assertEquals(false, addingTextAnnotation.isTextSelectionMode)
+        assertEquals(PdfInkTool.TEXT, addingTextAnnotation.selectedTool)
+        assertEquals(false, neutral.isTextSelectionMode)
+        assertEquals(PdfInkTool.NONE, neutral.selectedTool)
     }
 
     @Test
@@ -236,6 +311,7 @@ class PdfReaderSessionTest {
         assertEquals(0, punctuationResults.single().matchIndex)
         assertEquals("hello,\nworld".length, punctuationResults.single().matchLength)
         assertEquals(listOf(0, 2), alphaResults.map { it.pageIndex })
+        assertEquals(listOf(3, 3), alphaResults.map { it.matchLength })
     }
 
     @Test
@@ -294,6 +370,38 @@ class PdfReaderSessionTest {
         )
 
         assertEquals(5, pageIndex)
+    }
+
+    @Test
+    fun `vertical page gap option keeps default spacing or removes it`() {
+        assertEquals(8.dp, pdfVerticalPageGapDp(isPageGapVisible = true, defaultGap = 8.dp))
+        assertEquals(0.dp, pdfVerticalPageGapDp(isPageGapVisible = false, defaultGap = 8.dp))
+    }
+
+    @Test
+    fun `vertical page layout removes fractional pixel seams when gap is hidden`() {
+        val layout = calculatePdfVerticalPageLayoutPx(
+            pageAspectRatios = listOf(0.707f, 0.721f, 0.69f),
+            viewportWidthPx = 1081,
+            viewportHeightPx = 1920,
+            pageGapPx = 0
+        )
+
+        layout.pages.zipWithNext().forEach { (previous, next) ->
+            assertEquals(previous.bottomPx, next.topPx)
+        }
+    }
+
+    @Test
+    fun `vertical page layout keeps exact configured page gap`() {
+        val layout = calculatePdfVerticalPageLayoutPx(
+            pageAspectRatios = listOf(0.707f, 0.721f),
+            viewportWidthPx = 1081,
+            viewportHeightPx = 1920,
+            pageGapPx = 12
+        )
+
+        assertEquals(layout.pages.first().bottomPx + 12, layout.pages.last().topPx)
     }
 
     private fun annotation(id: String, pageIndex: Int): SharedPdfAnnotation {

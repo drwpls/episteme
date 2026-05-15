@@ -4,6 +4,7 @@ import android.content.Context
 import com.aryan.reader.SearchResult
 import com.aryan.reader.pdf.data.PdfMetaDao
 import com.aryan.reader.pdf.data.PdfMetadata
+import com.aryan.reader.pdf.data.PdfSearchIndex
 import com.aryan.reader.pdf.data.PdfSearchMatch
 import com.aryan.reader.pdf.data.PdfTextDao
 import com.aryan.reader.pdf.data.PdfTextDatabase
@@ -11,6 +12,7 @@ import com.aryan.reader.pdf.data.PdfTextRepository
 import com.aryan.reader.pdf.data.SmartSearchResult
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.coVerifyOrder
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
@@ -103,6 +105,29 @@ class PdfTextRepositoryTest {
         assertEquals(0, matches[0].occurrenceIndexInLocation)
         assertEquals(1, matches[1].occurrenceIndexInLocation)
         assertEquals("needle", matches[0].query)
+    }
+
+    @Test
+    fun `indexReaderPage replaces existing page text before inserting new text`() = runTest {
+        val document = mockk<ReaderDocument>()
+        val page = mockk<ReaderPage>(relaxed = true)
+        val textPage = mockk<ReaderTextPage>(relaxed = true)
+
+        coEvery { document.openPage(0) } returns page
+        coEvery { page.openTextPage() } returns textPage
+        coEvery { textPage.textPageCountChars() } returns 11
+        coEvery { textPage.textPageGetText(0, 11) } returns "hello world"
+        val insertedPageText = slot<PdfSearchIndex>()
+
+        repository.indexReaderPage("book", document, 0)
+
+        coVerifyOrder {
+            dao.deletePageText("book", 0)
+            dao.insertPageText(capture(insertedPageText))
+        }
+        assertEquals("book", insertedPageText.captured.bookId)
+        assertEquals(0, insertedPageText.captured.pageIndex)
+        assertEquals("hello world", insertedPageText.captured.content)
     }
 
     @Test

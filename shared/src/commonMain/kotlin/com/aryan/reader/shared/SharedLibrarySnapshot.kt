@@ -9,13 +9,17 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.floatOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import com.aryan.reader.shared.pdf.SharedPdfHighlighterPalette
+import com.aryan.reader.shared.pdf.SharedPdfReaderViewport
 import com.aryan.reader.shared.reader.ReaderBookmark
+import com.aryan.reader.shared.reader.ReaderPageSpreadMode
 import com.aryan.reader.shared.reader.ReaderReadingMode
 import com.aryan.reader.shared.reader.ReaderSettings
 import com.aryan.reader.shared.reader.SharedReaderTextAlign
@@ -28,7 +32,7 @@ data class SharedLibrarySnapshot(
     val customFonts: List<CustomFontItem> = emptyList(),
     val syncedFolders: List<SyncedFolder> = emptyList(),
     val recentFilesLimit: Int = 12,
-    val isTabsEnabled: Boolean = false,
+    val isTabsEnabled: Boolean = true,
     val openTabIds: List<String> = emptyList(),
     val activeTabBookId: String? = null,
     val pinnedHomeBookIds: Set<String> = emptySet(),
@@ -40,13 +44,16 @@ data class SharedLibrarySnapshot(
     val appTextDimFactorDark: Float = 1.0f,
     val appSeedColor: Color? = null,
     val customAppThemes: List<CustomAppTheme> = emptyList(),
+    val readerDefaultSettings: ReaderSettings = ReaderSettings(),
+    val pdfReaderDefaultSettings: ReaderSettings = ReaderSettings(themeId = "no_theme"),
     val readerToolbarPreferences: ReaderToolbarPreferences = ReaderToolbarPreferences(),
     val readerHighlightPalette: ReaderHighlightPalette = ReaderHighlightPalette(),
+    val pdfHighlighterPalette: SharedPdfHighlighterPalette = SharedPdfHighlighterPalette(),
     val readerTtsReplacementPreferences: ReaderTtsReplacementPreferences = ReaderTtsReplacementPreferences()
 )
 
 object SharedLibrarySnapshotJson {
-    private const val SCHEMA_VERSION = 10
+    private const val SCHEMA_VERSION = 19
 
     private val json = Json {
         prettyPrint = true
@@ -60,6 +67,10 @@ object SharedLibrarySnapshotJson {
 
         val schemaVersion = root.int("schemaVersion", 1)
         val openTabIds = root.stringArray("openTabIds")
+        val readerDefaultSettings = root["readerDefaultSettings"]
+            ?.takeUnless { it is JsonNull }
+            ?.asReaderSettingsOrNull()
+            ?: ReaderSettings()
         return SharedLibrarySnapshot(
             books = root.array("books")
                 .mapNotNull { it.asBookItemOrNull() }
@@ -70,7 +81,7 @@ object SharedLibrarySnapshotJson {
             customFonts = root.array("customFonts").mapNotNull { it.asCustomFontItemOrNull() },
             syncedFolders = root.array("syncedFolders").mapNotNull { it.asSyncedFolderOrNull() },
             recentFilesLimit = root.int("recentFilesLimit", 12),
-            isTabsEnabled = root.boolean("isTabsEnabled", false),
+            isTabsEnabled = root.boolean("isTabsEnabled", true),
             openTabIds = openTabIds,
             activeTabBookId = root.string("activeTabBookId"),
             pinnedHomeBookIds = root.stringArray("pinnedHomeBookIds").toSet(),
@@ -90,6 +101,11 @@ object SharedLibrarySnapshotJson {
                 ?: 1.0f,
             appSeedColor = root.int("appSeedColor")?.let { Color(it) },
             customAppThemes = root.array("customAppThemes").mapNotNull { it.asCustomAppThemeOrNull() },
+            readerDefaultSettings = readerDefaultSettings.migrateLegacyDefaultReadingMode(schemaVersion),
+            pdfReaderDefaultSettings = root["pdfReaderDefaultSettings"]
+                ?.takeUnless { it is JsonNull }
+                ?.asReaderSettingsOrNull()
+                ?: ReaderSettings(themeId = "no_theme"),
             readerToolbarPreferences = root["readerToolbarPreferences"]
                 ?.takeUnless { it is JsonNull }
                 ?.asReaderToolbarPreferencesOrNull()
@@ -98,6 +114,10 @@ object SharedLibrarySnapshotJson {
                 ?.takeUnless { it is JsonNull }
                 ?.asReaderHighlightPaletteOrNull()
                 ?: ReaderHighlightPalette(),
+            pdfHighlighterPalette = root["pdfHighlighterPalette"]
+                ?.takeUnless { it is JsonNull }
+                ?.asSharedPdfHighlighterPaletteOrNull()
+                ?: SharedPdfHighlighterPalette(),
             readerTtsReplacementPreferences = root["readerTtsReplacementPreferences"]
                 ?.takeUnless { it is JsonNull }
                 ?.let { ReaderTtsReplacementPreferencesJson.fromJsonElement(it) }
@@ -128,8 +148,11 @@ object SharedLibrarySnapshotJson {
                 "appTextDimFactorDark" to JsonPrimitive(snapshot.appTextDimFactorDark),
                 "appSeedColor" to snapshot.appSeedColor.asJson(),
                 "customAppThemes" to JsonArray(snapshot.customAppThemes.map { it.toJsonObject() }),
+                "readerDefaultSettings" to snapshot.readerDefaultSettings.asJson(),
+                "pdfReaderDefaultSettings" to snapshot.pdfReaderDefaultSettings.asJson(),
                 "readerToolbarPreferences" to snapshot.readerToolbarPreferences.sanitized().toJsonObject(),
                 "readerHighlightPalette" to snapshot.readerHighlightPalette.sanitized().toJsonObject(),
+                "pdfHighlighterPalette" to snapshot.pdfHighlighterPalette.sanitized().toJsonObject(),
                 "readerTtsReplacementPreferences" to ReaderTtsReplacementPreferencesJson.toJsonElement(
                     snapshot.readerTtsReplacementPreferences,
                 )
@@ -146,6 +169,12 @@ private fun JsonObject.array(name: String): List<JsonElement> {
 private fun JsonObject.stringArray(name: String): List<String> {
     return array(name).mapNotNull { element ->
         runCatching { element.jsonPrimitive.content }.getOrNull()
+    }
+}
+
+private fun JsonObject.intArray(name: String): List<Int> {
+    return array(name).mapNotNull { element ->
+        runCatching { element.jsonPrimitive.intOrNull }.getOrNull()
     }
 }
 
@@ -196,10 +225,18 @@ private fun List<BookItem>.migrateLegacyRecentState(schemaVersion: Int, openTabI
 private fun BookItem.hasReaderFootprint(openedBookIds: Set<String>): Boolean {
     return id in openedBookIds ||
         lastPageIndex != null ||
+        readerPosition != null ||
         (progressPercentage ?: 0f) > 0f ||
         readerSettings != null ||
         readerBookmarks.isNotEmpty() ||
-        readerHighlights.isNotEmpty()
+        readerHighlights.isNotEmpty() ||
+        pdfReaderViewport != null
+}
+
+private fun ReaderSettings.migrateLegacyDefaultReadingMode(schemaVersion: Int): ReaderSettings {
+    if (schemaVersion >= 17 || readingMode != ReaderReadingMode.PAGINATED) return this
+    val oldDefaultSettings = ReaderSettings(readingMode = ReaderReadingMode.PAGINATED)
+    return if (this == oldDefaultSettings) copy(readingMode = ReaderReadingMode.VERTICAL) else this
 }
 
 private fun JsonElement.asBookItemOrNull(): BookItem? {
@@ -216,18 +253,27 @@ private fun JsonElement.asBookItemOrNull(): BookItem? {
         coverImagePath = obj.string("coverImagePath"),
         title = obj.string("title"),
         author = obj.string("author"),
+        description = obj.string("description"),
+        originalTitle = obj.string("originalTitle"),
+        originalAuthor = obj.string("originalAuthor"),
+        originalSeriesName = obj.string("originalSeriesName"),
+        originalSeriesIndex = obj.double("originalSeriesIndex"),
+        originalDescription = obj.string("originalDescription"),
         progressPercentage = obj.float("progressPercentage"),
         isRecent = obj.boolean("isRecent", true),
         fileSize = obj.long("fileSize"),
+        fileContentModifiedTimestamp = obj.long("fileContentModifiedTimestamp"),
         sourceFolder = obj.string("sourceFolder"),
         folderTextMetadataParsed = obj.boolean("folderTextMetadataParsed", false),
         seriesName = obj.string("seriesName"),
         seriesIndex = obj.double("seriesIndex"),
         tags = obj.array("tags").mapNotNull { it.asTagOrNull() },
         lastPageIndex = obj.int("lastPageIndex"),
+        readerPosition = obj["readerPosition"]?.takeUnless { it is JsonNull }?.asReaderLocatorOrNull(),
         readerSettings = obj["readerSettings"]?.takeUnless { it is JsonNull }?.asReaderSettingsOrNull(),
         readerBookmarks = obj.array("readerBookmarks").mapNotNull { it.asReaderBookmarkOrNull() },
-        readerHighlights = obj.array("readerHighlights").mapNotNull { it.asReaderHighlightOrNull() }
+        readerHighlights = obj.array("readerHighlights").mapNotNull { it.asReaderHighlightOrNull() },
+        pdfReaderViewport = obj["pdfReaderViewport"]?.takeUnless { it is JsonNull }?.asSharedPdfReaderViewportOrNull()
     )
 }
 
@@ -282,8 +328,9 @@ private fun JsonElement.asSyncedFolderOrNull(): SyncedFolder? {
         lastScanTime = obj.long("lastScanTime"),
         allowedFileTypes = obj.stringArray("allowedFileTypes")
             .mapNotNull { runCatching { FileType.valueOf(it) }.getOrNull() }
+            .filter { it in SharedFileCapabilities.knownFileTypes }
             .toSet()
-            .ifEmpty { FileType.entries.toSet() }
+            .ifEmpty { SharedFileCapabilities.knownFileTypes }
     )
 }
 
@@ -307,18 +354,27 @@ private fun BookItem.toJsonObject(): JsonObject {
             "coverImagePath" to coverImagePath.asJson(),
             "title" to title.asJson(),
             "author" to author.asJson(),
+            "description" to description.asJson(),
+            "originalTitle" to originalTitle.asJson(),
+            "originalAuthor" to originalAuthor.asJson(),
+            "originalSeriesName" to originalSeriesName.asJson(),
+            "originalSeriesIndex" to originalSeriesIndex.asJson(),
+            "originalDescription" to originalDescription.asJson(),
             "progressPercentage" to progressPercentage.asJson(),
             "isRecent" to JsonPrimitive(isRecent),
             "fileSize" to JsonPrimitive(fileSize),
+            "fileContentModifiedTimestamp" to JsonPrimitive(fileContentModifiedTimestamp),
             "sourceFolder" to sourceFolder.asJson(),
             "folderTextMetadataParsed" to JsonPrimitive(folderTextMetadataParsed),
             "seriesName" to seriesName.asJson(),
             "seriesIndex" to seriesIndex.asJson(),
             "tags" to JsonArray(tags.map { it.toJsonObject() }),
             "lastPageIndex" to lastPageIndex.asJson(),
+            "readerPosition" to readerPosition.asJson(),
             "readerSettings" to readerSettings.asJson(),
             "readerBookmarks" to JsonArray(readerBookmarks.map { it.toJsonObject() }),
-            "readerHighlights" to JsonArray(readerHighlights.map { it.toJsonObject() })
+            "readerHighlights" to JsonArray(readerHighlights.map { it.toJsonObject() }),
+            "pdfReaderViewport" to pdfReaderViewport.asJson()
         )
     )
 }
@@ -374,7 +430,11 @@ private fun SyncedFolder.toJsonObject(): JsonObject {
             "uriString" to JsonPrimitive(uriString),
             "name" to JsonPrimitive(name),
             "lastScanTime" to JsonPrimitive(lastScanTime),
-            "allowedFileTypes" to allowedFileTypes.map { it.name }.sorted().asJsonArray()
+            "allowedFileTypes" to allowedFileTypes
+                .filter { it in SharedFileCapabilities.knownFileTypes }
+                .map { it.name }
+                .sorted()
+                .asJsonArray()
         )
     )
 }
@@ -397,6 +457,10 @@ private fun Long?.asJson(): JsonElement = this?.let { JsonPrimitive(it) } ?: Jso
 private fun Color?.asJson(): JsonElement = this?.let { JsonPrimitive(it.toArgb()) } ?: JsonNull
 
 private fun List<String>.asJsonArray(): JsonArray {
+    return JsonArray(map { JsonPrimitive(it) })
+}
+
+private fun List<Int>.asIntJsonArray(): JsonArray {
     return JsonArray(map { JsonPrimitive(it) })
 }
 
@@ -435,6 +499,17 @@ private fun JsonElement.asReaderSettingsOrNull(): ReaderSettings? {
         pageInfoPosition = obj.string("pageInfoPosition")
             ?.let { runCatching { PageInfoPosition.valueOf(it) }.getOrNull() }
             ?: defaults.pageInfoPosition,
+        pageSpreadMode = obj.string("pageSpreadMode")
+            ?.let { runCatching { ReaderPageSpreadMode.valueOf(it) }.getOrNull() }
+            ?: defaults.pageSpreadMode,
+        pdfVerticalPageGapVisible = obj.boolean(
+            "pdfVerticalPageGapVisible",
+            defaults.pdfVerticalPageGapVisible
+        ),
+        pdfPageNumberOverlayVisible = obj.boolean(
+            "pdfPageNumberOverlayVisible",
+            defaults.pdfPageNumberOverlayVisible
+        ),
         seamlessChapterNavigation = obj.boolean("seamlessChapterNavigation", defaults.seamlessChapterNavigation),
         chapterTurnDragMultiplier = obj.float("chapterTurnDragMultiplier") ?: defaults.chapterTurnDragMultiplier
     )
@@ -460,6 +535,29 @@ private fun JsonElement.asReaderHighlightPaletteOrNull(): ReaderHighlightPalette
     val colors = obj.stringArray("colorIds")
         .mapNotNull { colorId -> HighlightColor.entries.firstOrNull { it.id == colorId || it.name == colorId } }
     return ReaderHighlightPalette(colors = colors).sanitized()
+}
+
+private fun JsonElement.asSharedPdfHighlighterPaletteOrNull(): SharedPdfHighlighterPalette? {
+    val obj = runCatching { jsonObject }.getOrNull() ?: return null
+    return SharedPdfHighlighterPalette(colors = obj.intArray("colorsArgb")).sanitized()
+}
+
+private fun JsonElement.asSharedPdfReaderViewportOrNull(): SharedPdfReaderViewport? {
+    val obj = runCatching { jsonObject }.getOrNull() ?: return null
+    val defaults = SharedPdfReaderViewport()
+    return SharedPdfReaderViewport(
+        pageIndex = obj.int("pageIndex") ?: defaults.pageIndex,
+        displayMode = obj.string("displayMode")
+            ?.let { runCatching { PdfDisplayMode.valueOf(it) }.getOrNull() }
+            ?: defaults.displayMode,
+        zoom = obj.float("zoom") ?: defaults.zoom,
+        horizontalScrollOffset = obj.int("horizontalScrollOffset") ?: defaults.horizontalScrollOffset,
+        paginatedVerticalScrollOffset = obj.int("paginatedVerticalScrollOffset")
+            ?: defaults.paginatedVerticalScrollOffset,
+        verticalFirstPageIndex = obj.int("verticalFirstPageIndex") ?: defaults.verticalFirstPageIndex,
+        verticalFirstPageScrollOffset = obj.int("verticalFirstPageScrollOffset")
+            ?: defaults.verticalFirstPageScrollOffset
+    )
 }
 
 private fun JsonElement.asReaderBookmarkOrNull(): ReaderBookmark? {
@@ -551,6 +649,9 @@ private fun ReaderSettings?.asJson(): JsonElement {
             "systemUiMode" to JsonPrimitive(settings.systemUiMode.name),
             "pageInfoMode" to JsonPrimitive(settings.pageInfoMode.name),
             "pageInfoPosition" to JsonPrimitive(settings.pageInfoPosition.name),
+            "pageSpreadMode" to JsonPrimitive(settings.pageSpreadMode.name),
+            "pdfVerticalPageGapVisible" to JsonPrimitive(settings.pdfVerticalPageGapVisible),
+            "pdfPageNumberOverlayVisible" to JsonPrimitive(settings.pdfPageNumberOverlayVisible),
             "seamlessChapterNavigation" to JsonPrimitive(settings.seamlessChapterNavigation),
             "chapterTurnDragMultiplier" to JsonPrimitive(settings.chapterTurnDragMultiplier)
         )
@@ -572,6 +673,29 @@ private fun ReaderHighlightPalette.toJsonObject(): JsonObject {
     return JsonObject(
         mapOf(
             "colorIds" to sanitized().colors.map { it.id }.asJsonArray()
+        )
+    )
+}
+
+private fun SharedPdfHighlighterPalette.toJsonObject(): JsonObject {
+    return JsonObject(
+        mapOf(
+            "colorsArgb" to sanitized().colors.asIntJsonArray()
+        )
+    )
+}
+
+private fun SharedPdfReaderViewport?.asJson(): JsonElement {
+    val viewport = this ?: return JsonNull
+    return JsonObject(
+        mapOf(
+            "pageIndex" to JsonPrimitive(viewport.pageIndex),
+            "displayMode" to JsonPrimitive(viewport.displayMode.name),
+            "zoom" to JsonPrimitive(viewport.zoom),
+            "horizontalScrollOffset" to JsonPrimitive(viewport.horizontalScrollOffset),
+            "paginatedVerticalScrollOffset" to JsonPrimitive(viewport.paginatedVerticalScrollOffset),
+            "verticalFirstPageIndex" to JsonPrimitive(viewport.verticalFirstPageIndex),
+            "verticalFirstPageScrollOffset" to JsonPrimitive(viewport.verticalFirstPageScrollOffset)
         )
     )
 }
@@ -615,4 +739,8 @@ private fun ReaderLocator.toJsonObject(): JsonObject {
             cfi?.let { put("cfi", JsonPrimitive(it)) }
         }
     )
+}
+
+private fun ReaderLocator?.asJson(): JsonElement {
+    return this?.toJsonObject() ?: JsonNull
 }

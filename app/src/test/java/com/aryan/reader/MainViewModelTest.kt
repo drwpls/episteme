@@ -9,16 +9,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.credentials.CredentialManager
 import androidx.work.WorkManager
-import com.android.billingclient.api.BillingClient
-import com.android.billingclient.api.BillingResult
 import com.aryan.reader.data.*
 import com.aryan.reader.paginatedreader.Locator
 import com.aryan.reader.paginatedreader.data.BookCacheDao
 import com.aryan.reader.paginatedreader.data.BookCacheDatabase
 import com.aryan.reader.tts.TtsController
 import com.aryan.reader.tts.TtsPlaybackManager
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FirebaseFirestore
 import io.mockk.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -108,28 +104,8 @@ class MainViewModelTest {
         mockkObject(WorkManager.Companion)
         val mockWorkManager = mockk<WorkManager>(relaxed = true)
         every { WorkManager.getInstance(any()) } returns mockWorkManager
-        mockkStatic(FirebaseAuth::class)
-        every { FirebaseAuth.getInstance() } returns mockk(relaxed = true)
-        mockkStatic(FirebaseFirestore::class)
-        every { FirebaseFirestore.getInstance() } returns mockk(relaxed = true)
         mockkObject(CredentialManager.Companion)
         every { CredentialManager.create(any()) } returns mockk(relaxed = true)
-        mockkStatic(BillingClient::class)
-        val mockBillingClient = mockk<BillingClient>(relaxed = true)
-        val mockBillingBuilder = mockk<BillingClient.Builder>(relaxed = true)
-        every { BillingClient.newBuilder(any()) } returns mockBillingBuilder
-        every { mockBillingBuilder.setListener(any()) } returns mockBillingBuilder
-        every { mockBillingBuilder.enablePendingPurchases(any()) } returns mockBillingBuilder
-        every { mockBillingBuilder.build() } returns mockBillingClient
-        every { mockBillingClient.isReady } returns false
-        every { mockBillingClient.startConnection(any()) } answers {
-            firstArg<com.android.billingclient.api.BillingClientStateListener>()
-                .onBillingSetupFinished(
-                    BillingResult.newBuilder()
-                        .setResponseCode(BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE)
-                        .build()
-                )
-        }
         mockkConstructor(AuthRepository::class)
         mockkConstructor(RecentFilesRepository::class)
         mockkConstructor(BillingClientWrapper::class)
@@ -140,6 +116,14 @@ class MainViewModelTest {
         mockkConstructor(TtsController::class)
 
         every { anyConstructed<BillingClientWrapper>().proUpgradeState } returns billingStateFlow
+        every { anyConstructed<BillingClientWrapper>().initializeConnection() } just Runs
+        every { anyConstructed<BillingClientWrapper>().refreshPurchasesAsync() } just Runs
+        every { anyConstructed<BillingClientWrapper>().clearVerificationState() } just Runs
+        every { anyConstructed<BillingClientWrapper>().clearAccountConflict() } just Runs
+        every { anyConstructed<BillingClientWrapper>().markAccountConflict() } just Runs
+        every { anyConstructed<BillingClientWrapper>().clearError() } just Runs
+        every { anyConstructed<BillingClientWrapper>().consumePurchase(any()) } just Runs
+        every { anyConstructed<BillingClientWrapper>().launchPurchaseFlow(any(), any(), any()) } just Runs
         every { anyConstructed<AuthRepository>().getSignedInUser() } returns null
         every { anyConstructed<AuthRepository>().observeAuthState() } returns flowOf(null)
         every { anyConstructed<RemoteConfigRepository>().init() } just Runs
@@ -567,6 +551,36 @@ class MainViewModelTest {
     }
 
     @Test
+    fun `updateLibraryFilters drops unknown file type before state and prefs`() = runTest {
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        val requested = LibraryFilters(
+            fileTypes = setOf(FileType.PDF, FileType.UNKNOWN),
+            sourceFolders = setOf("content://sync"),
+            readStatus = ReadStatusFilter.IN_PROGRESS,
+            tagIds = setOf("favorite")
+        )
+        val expected = requested.copy(fileTypes = setOf(FileType.PDF))
+
+        viewModel.updateLibraryFilters(requested)
+
+        val state = viewModel.uiState.first { it.libraryFilters == expected }
+        assertEquals(expected, state.libraryFilters)
+        assertFalse(FileType.UNKNOWN in state.libraryFilters.fileTypes)
+        verify { mockEditor.putStringSet(KEY_FILTER_FILE_TYPES, setOf("PDF")) }
+    }
+
+    @Test
+    fun `saved library file filters drop stale unknown values during restore`() = runTest {
+        every { mockPrefs.getStringSet(KEY_FILTER_FILE_TYPES, any()) } returns mutableSetOf("PDF", "UNKNOWN")
+
+        val restored = MainViewModel(mockApplication)
+
+        assertEquals(setOf(FileType.PDF), restored.uiState.value.libraryFilters.fileTypes)
+    }
+
+    @Test
     fun `updateLibraryFilters clears active filters and persists empty dimensions`() = runTest {
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -954,6 +968,22 @@ class MainViewModelTest {
         assertEquals(null, clearedState.bannerMessage)
     }
 
+    @Test
+    fun `persistent banner is not auto dismissed`() = runTest {
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+
+        viewModel.showBanner("Syncing", isPersistent = true)
+        viewModel.uiState.first { it.bannerMessage?.message == "Syncing" }
+        runCurrent()
+
+        advanceTimeBy(3_000L)
+        runCurrent()
+
+        assertEquals("Syncing", viewModel.uiState.value.bannerMessage?.message)
+    }
+
     private fun recentFile(
         id: String,
         type: FileType = FileType.EPUB,
@@ -970,10 +1000,16 @@ class MainViewModelTest {
         title = title
     )
 
-    private fun mockUri(uriString: String): Uri {
+    private fun mockUri(
+        uriString: String,
+        path: String? = uriString.substringAfter(":", ""),
+        lastPathSegment: String? = path?.substringAfterLast('/')
+    ): Uri {
         return mockk<Uri>().also { uri ->
             every { uri.toString() } returns uriString
             every { uri.scheme } returns uriString.substringBefore(":", "")
+            every { uri.path } returns path
+            every { uri.lastPathSegment } returns lastPathSegment
         }
     }
 

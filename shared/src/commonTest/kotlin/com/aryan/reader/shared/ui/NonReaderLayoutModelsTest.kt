@@ -4,6 +4,9 @@ import com.aryan.reader.shared.BookItem
 import com.aryan.reader.shared.FileType
 import com.aryan.reader.shared.LibraryFilters
 import com.aryan.reader.shared.ReadStatusFilter
+import com.aryan.reader.shared.ReaderPlatform
+import com.aryan.reader.shared.SharedFeaturePolicy
+import com.aryan.reader.shared.SharedFileCapabilities
 import com.aryan.reader.shared.SharedReaderScreenState
 import com.aryan.reader.shared.Shelf
 import com.aryan.reader.shared.ShelfType
@@ -15,6 +18,43 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class NonReaderLayoutModelsTest {
+
+    @Test
+    fun `desktop library exposes the same top level organization tabs as Android`() {
+        val visibleTabs = visibleNonReaderLibraryTabs()
+
+        assertEquals(
+            listOf(
+                NonReaderLibraryTab.BOOKS,
+                NonReaderLibraryTab.SHELVES,
+                NonReaderLibraryTab.FOLDERS
+            ),
+            visibleTabs
+        )
+        assertFalse(NonReaderLibraryTab.SMART_SHELVES in visibleTabs)
+        assertFalse(NonReaderLibraryTab.TAGS in visibleTabs)
+        assertFalse(NonReaderLibraryTab.UNREAD in visibleTabs)
+        assertFalse(NonReaderLibraryTab.IN_PROGRESS in visibleTabs)
+        assertFalse(NonReaderLibraryTab.COMPLETED in visibleTabs)
+    }
+
+    @Test
+    fun `desktop library filter file type groups include every shared readable format`() {
+        val groupedTypes = nonReaderLibraryFileTypeGroups().flatMap { it.fileTypes }
+
+        assertEquals(
+            SharedFileCapabilities.readableTypesFor(ReaderPlatform.DESKTOP),
+            groupedTypes.toSet()
+        )
+        assertEquals(groupedTypes.size, groupedTypes.toSet().size)
+        assertTrue(FileType.DOCX in groupedTypes)
+        assertTrue(FileType.FODT in groupedTypes)
+        assertFalse(FileType.PPTX in groupedTypes)
+        assertTrue(
+            nonReaderLibraryFileTypeGroups()
+                .any { it.title == "Comics" && FileType.CBR in it.fileTypes && FileType.CB7 in it.fileTypes }
+        )
+    }
 
     @Test
     fun `home layout separates active tab pinned and recent books`() {
@@ -117,6 +157,56 @@ class NonReaderLayoutModelsTest {
     }
 
     @Test
+    fun `library visible selection follows folder shelf navigation`() {
+        val rootBook = book("root", sourceFolder = "/sync")
+        val childBook = book("child", sourceFolder = "/sync")
+        val rootShelf = Shelf(
+            id = "folder_/sync",
+            name = "Sync",
+            type = ShelfType.FOLDER,
+            books = listOf(rootBook, childBook),
+            directBooks = listOf(rootBook),
+            childShelfIds = listOf("folder_/sync::Nested")
+        )
+        val childShelf = Shelf(
+            id = "folder_/sync::Nested",
+            name = "Nested",
+            type = ShelfType.FOLDER,
+            books = listOf(childBook),
+            directBooks = listOf(childBook),
+            parentShelfId = rootShelf.id,
+            depth = 1
+        )
+
+        val rootState = SharedReaderScreenState(
+            shelves = listOf(rootShelf, childShelf),
+            libraryBooks = listOf(rootBook, childBook)
+        )
+        val childState = rootState.copy(viewingShelfId = childShelf.id)
+
+        assertEquals(
+            listOf("root", "child"),
+            rootState.visibleBooksForLibrarySelection(NonReaderLibraryTab.FOLDERS).map { it.id }
+        )
+        assertEquals(
+            listOf("child"),
+            childState.visibleBooksForLibrarySelection(NonReaderLibraryTab.FOLDERS).map { it.id }
+        )
+    }
+
+    @Test
+    fun `library organization does not expose unknown as an available file type`() {
+        val organization = SharedReaderScreenState(
+            rawLibraryBooks = listOf(
+                book("known", type = FileType.PDF),
+                book("unknown", type = FileType.UNKNOWN)
+            )
+        ).toNonReaderLibraryOrganizationModel()
+
+        assertEquals(listOf(FileType.PDF), organization.availableFileTypes)
+    }
+
+    @Test
     fun `shell model keeps primary navigation simple and exposes all tool actions`() {
         val model = sharedAppShellModel(
             selectedTab = SharedAppTab.CUSTOM_FONTS,
@@ -124,7 +214,7 @@ class NonReaderLayoutModelsTest {
         )
 
         assertEquals(
-            listOf(SharedAppTab.HOME, SharedAppTab.LIBRARY, SharedAppTab.CATALOGS, SharedAppTab.READER),
+            listOf(SharedAppTab.HOME, SharedAppTab.LIBRARY, SharedAppTab.CATALOGS),
             model.primaryTabs
         )
         assertEquals(SharedAppTab.HOME, model.selectedPrimaryTab)
@@ -138,10 +228,66 @@ class NonReaderLayoutModelsTest {
         assertTrue(SharedAppToolAction.SUPPORT in model.toolActions)
         assertTrue(SharedAppToolAction.ABOUT in model.toolActions)
         assertTrue(SharedAppToolAction.TABS_TOGGLE in model.toolActions)
+        assertTrue(model.showPrimaryNavigation)
 
         val withoutAi = sharedAppShellModel(SharedAppTab.SHELVES, aiSettingsAvailable = false)
         assertEquals(SharedAppTab.LIBRARY, withoutAi.selectedPrimaryTab)
         assertFalse(SharedAppToolAction.AI_SETTINGS in withoutAi.toolActions)
+    }
+
+    @Test
+    fun `shell model hides primary navigation while reading`() {
+        val readerModel = sharedAppShellModel(
+            selectedTab = SharedAppTab.READER,
+            aiSettingsAvailable = true
+        )
+        val libraryModel = sharedAppShellModel(
+            selectedTab = SharedAppTab.LIBRARY,
+            aiSettingsAvailable = true
+        )
+
+        assertFalse(readerModel.showPrimaryNavigation)
+        assertTrue(libraryModel.showPrimaryNavigation)
+    }
+
+    @Test
+    fun `offline shell model hides network backed navigation and tools`() {
+        val model = sharedAppShellModel(
+            selectedTab = SharedAppTab.CATALOGS,
+            aiSettingsAvailable = true,
+            featurePolicy = SharedFeaturePolicy.OssOffline
+        )
+
+        assertEquals(listOf(SharedAppTab.HOME, SharedAppTab.LIBRARY), model.primaryTabs)
+        assertEquals(SharedAppTab.HOME, model.selectedPrimaryTab)
+        assertFalse(SharedAppToolAction.AI_SETTINGS in model.toolActions)
+        assertFalse(SharedAppToolAction.HELP_FEEDBACK in model.toolActions)
+        assertFalse(SharedAppToolAction.SUPPORT in model.toolActions)
+        assertTrue(SharedAppToolAction.CUSTOM_FONTS in model.toolActions)
+        assertTrue(SharedAppToolAction.ABOUT in model.toolActions)
+        assertTrue(model.showPrimaryNavigation)
+    }
+
+    @Test
+    fun `collection cover stack uses Android cover order and limit`() {
+        val books = listOf(
+            book("one", coverImagePath = "/covers/one.png"),
+            book("two", coverImagePath = "/covers/two.png"),
+            book("three", coverImagePath = "/covers/three.png"),
+            book("four", coverImagePath = "/covers/four.png"),
+            book("five", coverImagePath = "/covers/five.png")
+        )
+
+        val coverBooks = collectionCoverStackBooks(
+            Shelf("manual", "Manual", ShelfType.MANUAL, books)
+        )
+
+        assertEquals(listOf("four", "three", "two", "one"), coverBooks.map { it.id })
+        assertEquals(
+            listOf("/covers/four.png", "/covers/three.png", "/covers/two.png", "/covers/one.png"),
+            coverBooks.map { it.coverImagePath }
+        )
+        assertTrue(collectionCoverStackBooks(Shelf("empty", "Empty", ShelfType.FOLDER, emptyList())).isEmpty())
     }
 
     private fun book(
@@ -151,13 +297,15 @@ class NonReaderLayoutModelsTest {
         progress: Float? = null,
         tags: List<Tag> = emptyList(),
         sourceFolder: String? = null,
-        path: String? = "/books/$id.epub"
+        path: String? = "/books/$id.epub",
+        coverImagePath: String? = null
     ) = BookItem(
         id = id,
         path = path,
         type = type,
         displayName = "$id.epub",
         timestamp = 1L,
+        coverImagePath = coverImagePath,
         title = title,
         progressPercentage = progress,
         tags = tags,

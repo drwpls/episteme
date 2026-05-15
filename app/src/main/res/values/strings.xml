@@ -508,6 +508,7 @@
     <string name="error_recent_item_not_found">Could not find recent item.</string>
     <string name="error_import_file_failed">Failed to import file.</string>
     <string name="error_file_location_not_found">Could not find file location.</string>
+    <string name="error_unsupported_file_type">This file type is not supported.</string>
     <!-- "Text view" is the name of the PDF reflow feature in this app. -->
     <string name="error_load_generated_text_view">Failed to load generated text view.</string>
     <!-- "Text view" is the name of the PDF reflow feature in this app. -->
@@ -690,10 +691,10 @@
     <string name="menu_view_original_pdf">View Original PDF</string>
     <!-- "Text View" is the name of the PDF reflow feature in this app — keep consistent. -->
     <string name="menu_delete_text_view">Delete Text View</string>
-    <!-- Menu item to switch reading mode. The colon-separated format "Reading Mode: Vertical" is intentional — do not omit the colon. -->
-    <string name="menu_reading_mode_vertical">Reading Mode: Vertical</string>
-    <!-- Menu item to switch reading mode. The colon-separated format "Reading Mode: Paginated" is intentional — do not omit the colon. -->
-    <string name="menu_reading_mode_paginated">Reading Mode: Paginated</string>
+    <!-- Menu item inside the reading mode submenu. -->
+    <string name="menu_reading_mode_vertical">Vertical</string>
+    <!-- Menu item inside the reading mode submenu. -->
+    <string name="menu_reading_mode_paginated">Paginated (left-to-right)</string>
     <!-- Accessibility label for a menu item that is currently active/checked. -->
     <string name="content_desc_enabled">Enabled</string>
     <string name="menu_remove_bookmark">Remove bookmark</string>
@@ -704,11 +705,17 @@
     <string name="menu_realistic_page_turns">Realistic Page Turns</string>
     <string name="menu_keep_screen_on">Keep Screen On</string>
     <string name="menu_visual_options">Visual Options</string>
+    <string name="menu_screen_orientation">Screen Orientation</string>
+    <string name="menu_change_reading_mode">Change Reading Mode</string>
+    <string name="menu_right_to_left_pagination">Paginated (right-to-left)</string>
     <string name="menu_auto_scroll">Auto Scroll</string>
+    <!-- TTS = Text-to-Speech. -->
+    <string name="menu_tts_settings">TTS Settings</string>
     <!-- TTS = Text-to-Speech. -->
     <string name="menu_tts_voice_settings">TTS Voice Settings</string>
     <!-- TTS = Text-to-Speech. -->
     <string name="menu_tts_word_replacements">TTS Word Replacements</string>
+    <string name="menu_share_save_print">Share, Save or Print</string>
     <!-- TTS = Text-to-Speech. Debug-only menu item. -->
     <string name="menu_tts_settings_debug">TTS Settings (Debug)</string>
     <string name="content_desc_navigate_slider">Navigate with slider</string>
@@ -824,9 +831,16 @@
     <string name="button_import_from_files">Import from Files</string>
     <string name="no_imported_fonts_yet">No imported fonts yet.</string>
     <string name="visual_options_title">Visual Options</string>
+    <string name="visual_options_page_layout">Page layout</string>
+    <string name="visual_options_remove_page_gap">Remove gap between pages</string>
+    <string name="visual_options_remove_page_gap_desc">Applies to vertical reading mode.</string>
+    <string name="visual_options_hide_page_number_overlay">Hide page number overlay</string>
+    <string name="visual_options_hide_page_number_overlay_desc">Removes the small page count label from each page.</string>
     <!-- "Status Bar" and "Navigation Bar" are standard Android UI terms — keep consistent with your OS locale if applicable. -->
     <string name="visual_options_system_ui">System UI (Status &amp; Navigation Bars)</string>
     <string name="visual_options_system_ui_desc">Control the visibility of the device\'s system bars.</string>
+    <string name="visual_options_screen_orientation">Screen Orientation</string>
+    <string name="visual_options_screen_orientation_desc">Choose whether the reader follows the system orientation or prefers portrait or landscape when Android allows it.</string>
     <string name="visual_options_progress_bar">Progress Bar</string>
     <string name="visual_options_progress_bar_desc">The reading progress and chapter indicator on the reading screen.</string>
     <string name="visual_options_progress_bar_position">Position</string>
@@ -1164,6 +1178,11 @@
     <string name="section_files">Files</string>
 
     <!-- TTS settings sheet labels. TTS = Text-to-Speech. -->
+    <string name="tts_notification_channel_name">Text to speech</string>
+    <string name="tts_notification_channel_desc">Playback controls for text to speech.</string>
+    <string name="tts_notification_preparing">Preparing text to speech</string>
+    <!-- Notification text. %1$s = chapter title. -->
+    <string name="tts_notification_preparing_chapter">Preparing: %1$s</string>
     <string name="tts_active_engine">Active TTS Engine</string>
     <string name="tts_mode_cloud_ai">Cloud AI</string>
     <string name="tts_mode_device_native">Device Native</string>

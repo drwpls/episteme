@@ -71,6 +71,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.FavoriteBorder
@@ -140,10 +141,8 @@ import androidx.navigation.NavHostController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.aryan.reader.data.RecentFileItem
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import timber.log.Timber
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -171,15 +170,16 @@ fun HomeScreen(
 
     CompositionLocalProvider(LocalUriHandler provides customTabUriHandler) {
         val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-        val screenModel = remember(uiState) { uiState.toHomeScreenModel() }
-        val recentFilesForHome = screenModel.recentFiles
-        val openTabs = screenModel.openTabs
-        val selectedContextItems = screenModel.selectedItems
-        val isContextualModeActive = screenModel.isContextualModeActive
+        val recentFilesForHome = uiState.recentFiles
+        val openTabs = uiState.openTabs
+        val selectedContextItems = uiState.contextualActionItems
+        val isContextualModeActive = selectedContextItems.isNotEmpty()
+        val isHomeEmpty = recentFilesForHome.isEmpty() && (!uiState.isTabsEnabled || openTabs.isEmpty())
+        val isLibraryEmpty = uiState.rawLibraryFiles.isEmpty()
         val scope = rememberCoroutineScope()
         val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
         val snackbarHostState = remember { SnackbarHostState() }
-        val deviceLimitState = screenModel.deviceLimitState
+        val deviceLimitState = uiState.deviceLimitState
 
         var showDeleteConfirmDialog by remember { mutableStateOf(false) }
         var showClearCloudDataDialog by remember { mutableStateOf(false) }
@@ -221,15 +221,6 @@ fun HomeScreen(
             if (uiState.isRequestingDrivePermission) {
                 val intent = viewModel.getDriveSignInIntent(context)
                 drivePermissionLauncher.launch(intent)
-            }
-        }
-
-        LaunchedEffect(uiState.bannerMessage) {
-            uiState.bannerMessage?.let { msg ->
-                if (!msg.isPersistent) {
-                    delay(3000L)
-                    viewModel.bannerMessageShown()
-                }
             }
         }
 
@@ -319,6 +310,12 @@ fun HomeScreen(
                                 navController.navigate(AppDestinations.AI_SETTINGS_SCREEN_ROUTE)
                             }
                         },
+                        onSettingsClick = {
+                            scope.launch {
+                                drawerState.close()
+                                navController.navigate(AppDestinations.SETTINGS_SCREEN_ROUTE)
+                            }
+                        },
                         navController = navController,
                         onFolderSyncToggle = viewModel::setFolderSyncEnabled
                     )
@@ -353,6 +350,9 @@ fun HomeScreen(
                                     }
                                 },
                                 onAppThemeClick = { showAppThemePanel = true },
+                                onSettingsClick = {
+                                    navController.navigate(AppDestinations.SETTINGS_SCREEN_ROUTE)
+                                },
                                 onTestPanelDetectionClick = { viewModel.testPanelDetection(context) },
                                 onTestSpeechBubbleDetectionClick = { viewModel.testSpeechBubbleDetection(context) },
                                 onLanguageClick = { showLanguageDialog = true },
@@ -394,8 +394,8 @@ fun HomeScreen(
                                 .fillMaxSize()
                                 .padding(paddingValues)
                         ) {
-                            if (screenModel.isEmpty) {
-                                if (screenModel.isLibraryEmpty) {
+                            if (isHomeEmpty) {
+                                if (isLibraryEmpty) {
                                     EmptyState(
                                         title = stringResource(R.string.your_library_empty),
                                         message = stringResource(R.string.your_library_empty_desc),
@@ -502,8 +502,14 @@ fun HomeScreen(
                                     showInfoDialog = false
                                     itemForInfoDialog = null
                                 },
-                                onUpdateName = { newName ->
-                                    viewModel.updateCustomName(item.bookId, newName)
+                                onSaveMetadata = { metadata ->
+                                    viewModel.updateBookMetadata(item.bookId, metadata)
+                                },
+                                onSaveDisplayName = { name ->
+                                    viewModel.updateCustomName(item.bookId, name)
+                                },
+                                onRestoreMetadata = {
+                                    viewModel.restoreOriginalBookMetadata(item.bookId)
                                 },
                                 onOpenTags = { viewModel.openTagSelection(setOf(item.bookId)) }
                             )
@@ -793,16 +799,8 @@ fun RecentFileCard(
     onLongClick: () -> Unit,
     isDownloading: Boolean,
 ) {
-    val context = LocalContext.current
     val progressPercent = item.progressPercentage?.takeIf { it > 0f }?.coerceIn(0f, 100f)?.toInt()
     val authorText = item.author?.takeIf { it.isNotBlank() && !it.equals("Unknown", ignoreCase = true) } ?: " "
-    val placeholder = when (item.type) {
-        FileType.PDF -> R.drawable.pdf_placeholder
-        FileType.EPUB, FileType.MOBI, FileType.FB2, FileType.MD, FileType.TXT, FileType.HTML, FileType.CBZ, FileType.CBR, FileType.CB7, FileType.DOCX, FileType.ODT, FileType.FODT -> R.drawable.epub_placeholder
-    }
-    val imageModel = remember(item.coverImagePath) {
-        item.coverImagePath?.let { File(it) } ?: placeholder
-    }
 
     androidx.compose.material3.ElevatedCard(
         modifier = modifier
@@ -827,24 +825,25 @@ fun RecentFileCard(
                     .fillMaxWidth()
                     .aspectRatio(0.74f)
             ) {
-                AsyncImage(
-                    model = ImageRequest.Builder(context).data(imageModel).error(placeholder)
-                        .fallback(placeholder).crossfade(true).build(),
+                ThemedBookCover(
+                    item = item,
                     contentDescription = item.displayName,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
 
-                Box(
-                    modifier = Modifier.fillMaxSize().background(
-                        androidx.compose.ui.graphics.Brush.verticalGradient(
-                            0f to Color.Black.copy(alpha = 0.15f),
-                            0.3f to Color.Transparent,
-                            0.6f to Color.Transparent,
-                            1f to Color.Black.copy(alpha = 0.5f)
+                if (!item.coverImagePath.isNullOrBlank()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize().background(
+                            androidx.compose.ui.graphics.Brush.verticalGradient(
+                                0f to Color.Black.copy(alpha = 0.15f),
+                                0.3f to Color.Transparent,
+                                0.6f to Color.Transparent,
+                                1f to Color.Black.copy(alpha = 0.5f)
+                            )
                         )
                     )
-                )
+                }
 
                 if (item.sourceFolderUri != null || item.isOpdsStream() || isPinned) {
                     FileStatusBadges(
@@ -1024,6 +1023,7 @@ fun DefaultTopAppBar(
     onExternalFileBehaviorClick: () -> Unit,
     onStrictFilterToggleClick: () -> Unit,
     onAppThemeClick: () -> Unit,
+    onSettingsClick: () -> Unit,
     onTestPanelDetectionClick: () -> Unit,
     onTestSpeechBubbleDetectionClick: () -> Unit,
     onLanguageClick: () -> Unit,
@@ -1048,6 +1048,9 @@ fun DefaultTopAppBar(
             }
         }
     }, actions = {
+        IconButton(onClick = onSettingsClick) {
+            Icon(Icons.Default.Settings, contentDescription = "Settings")
+        }
         Box {
             IconButton(onClick = onAppThemeClick) {
                 Icon(painterResource(id = R.drawable.palette), contentDescription = stringResource(R.string.content_desc_app_theme))
@@ -1134,19 +1137,21 @@ fun DefaultTopAppBar(
                     showOptionsMenu = false
                 })
 
-                DropdownMenuItem(
-                    text = { Text(if (hideReaderAiFeatures) "Show AI in reader" else "Hide AI in reader") },
-                    onClick = {
-                        onToggleHideReaderAi()
-                        hideReaderAiFeatures = !hideReaderAiFeatures
-                        showOptionsMenu = false
-                    },
-                    trailingIcon = {
-                        if (hideReaderAiFeatures) {
-                            Icon(Icons.Default.Check, contentDescription = stringResource(R.string.content_desc_enabled))
+                if (!BuildConfig.IS_OFFLINE) {
+                    DropdownMenuItem(
+                        text = { Text(if (hideReaderAiFeatures) "Show AI in reader" else "Hide AI in reader") },
+                        onClick = {
+                            onToggleHideReaderAi()
+                            hideReaderAiFeatures = !hideReaderAiFeatures
+                            showOptionsMenu = false
+                        },
+                        trailingIcon = {
+                            if (hideReaderAiFeatures) {
+                                Icon(Icons.Default.Check, contentDescription = stringResource(R.string.content_desc_enabled))
+                            }
                         }
-                    }
-                )
+                    )
+                }
 
                 HorizontalDivider()
                 DropdownMenuItem(text = { Text(stringResource(R.string.options_clear_book_cache)) }, onClick = {
@@ -1204,6 +1209,7 @@ private fun AppDrawerContent(
     onSyncUpsellClick: () -> Unit,
     onFontsClick: () -> Unit,
     onAiSettingsClick: () -> Unit,
+    onSettingsClick: () -> Unit,
     navController: NavHostController,
     onFolderSyncToggle: (Boolean) -> Unit
 ) {
@@ -1365,6 +1371,14 @@ private fun AppDrawerContent(
                 }
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
             }
+
+            NavigationDrawerItem(
+                icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                label = { Text("Settings") },
+                selected = false,
+                onClick = onSettingsClick,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+            )
 
             NavigationDrawerItem(
                 icon = { Icon(painterResource(id = R.drawable.fonts), contentDescription = null) },

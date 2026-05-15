@@ -52,10 +52,17 @@ data class RecentFileEntity(
     @ColumnInfo(defaultValue = "NULL") val customName: String?,
     @ColumnInfo(defaultValue = "NULL") val highlights: String?,
     @ColumnInfo(name = "fileSize", defaultValue = "0") val fileSize: Long,
+    @ColumnInfo(defaultValue = "0") val fileContentModifiedTimestamp: Long = 0L,
     @ColumnInfo(defaultValue = "NULL") val seriesName: String?,
     @ColumnInfo(defaultValue = "NULL") val seriesIndex: Double?,
     @ColumnInfo(defaultValue = "NULL") val description: String?,
-    @ColumnInfo(defaultValue = "0") val folderTextMetadataParsed: Boolean
+    @ColumnInfo(defaultValue = "0") val folderTextMetadataParsed: Boolean,
+    @ColumnInfo(defaultValue = "0") val folderCoverMetadataParsed: Boolean = false,
+    @ColumnInfo(defaultValue = "NULL") val originalTitle: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val originalAuthor: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val originalSeriesName: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val originalSeriesIndex: Double? = null,
+    @ColumnInfo(defaultValue = "NULL") val originalDescription: String? = null
 )
 
 data class RecentFileSummary(
@@ -81,7 +88,13 @@ data class RecentFileSummary(
     @ColumnInfo(defaultValue = "0") val isReflowPreferred: Boolean,
     @ColumnInfo(defaultValue = "NULL") val customName: String?,
     @ColumnInfo(name = "fileSize", defaultValue = "0") val fileSize: Long,
+    @ColumnInfo(defaultValue = "0") val fileContentModifiedTimestamp: Long = 0L,
     @ColumnInfo(defaultValue = "NULL") val seriesName: String?,
     @ColumnInfo(defaultValue = "NULL") val seriesIndex: Double?,
-    @ColumnInfo(defaultValue = "NULL") val description: String?
+    @ColumnInfo(defaultValue = "NULL") val description: String?,
+    @ColumnInfo(defaultValue = "NULL") val originalTitle: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val originalAuthor: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val originalSeriesName: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val originalSeriesIndex: Double? = null,
+    @ColumnInfo(defaultValue = "NULL") val originalDescription: String? = null
 )

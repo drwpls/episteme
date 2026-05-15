@@ -20,13 +20,19 @@ data class FolderBookMetadata(
     val locatorBlockIndex: Int?,
     val locatorCharOffset: Int?,
     val customName: String?,
-    val highlightsJson: String?
+    val highlightsJson: String?,
+    val seriesName: String? = null,
+    val seriesIndex: Double? = null,
+    val description: String? = null,
+    val originalTitle: String? = null,
+    val originalAuthor: String? = null,
+    val originalSeriesName: String? = null,
+    val originalSeriesIndex: Double? = null,
+    val originalDescription: String? = null
 ) {
     fun toJsonString(): String {
         val json = JSONObject()
         json.put("bookId", bookId)
-        json.put("title", title)
-        json.put("author", author)
         json.put("displayName", displayName)
         json.put("type", type)
         json.put("lastChapterIndex", lastChapterIndex ?: -1)
@@ -58,8 +64,8 @@ data class FolderBookMetadata(
 
             return FolderBookMetadata(
                 bookId = json.getString("bookId"),
-                title = json.optStringNull("title"),
-                author = json.optStringNull("author"),
+                title = null,
+                author = null,
                 displayName = json.optString("displayName", "Unknown"),
                 type = json.optString("type", "PDF"),
                 lastChapterIndex = json.optIntNull("lastChapterIndex"),
@@ -72,7 +78,15 @@ data class FolderBookMetadata(
                 locatorBlockIndex = json.optIntNull("locatorBlockIndex"),
                 locatorCharOffset = json.optIntNull("locatorCharOffset"),
                 customName = json.optStringNull("customName"),
-                highlightsJson = json.optStringNull("highlightsJson")
+                highlightsJson = json.optStringNull("highlightsJson"),
+                seriesName = null,
+                seriesIndex = null,
+                description = null,
+                originalTitle = null,
+                originalAuthor = null,
+                originalSeriesName = null,
+                originalSeriesIndex = null,
+                originalDescription = null
             )
         }
     }
@@ -86,8 +100,8 @@ fun FolderBookMetadata.toRecentFileItem(uriString: String?, coverPath: String?, 
         displayName = this.displayName,
         timestamp = System.currentTimeMillis(),
         coverImagePath = coverPath,
-        title = this.title,
-        author = this.author,
+        title = this.displayName.substringBeforeLast('.', this.displayName),
+        author = null,
         lastChapterIndex = this.lastChapterIndex,
         lastPage = this.lastPage,
         lastPositionCfi = this.lastPositionCfi,
@@ -101,6 +115,14 @@ fun FolderBookMetadata.toRecentFileItem(uriString: String?, coverPath: String?, 
         bookmarksJson = this.bookmarksJson,
         sourceFolderUri = sourceFolderUri,
         customName = this.customName,
-        highlightsJson = this.highlightsJson
+        highlightsJson = this.highlightsJson,
+        seriesName = null,
+        seriesIndex = null,
+        description = null,
+        originalTitle = null,
+        originalAuthor = null,
+        originalSeriesName = null,
+        originalSeriesIndex = null,
+        originalDescription = null
     )
 }

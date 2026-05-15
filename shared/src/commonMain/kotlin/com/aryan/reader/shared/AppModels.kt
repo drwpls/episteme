@@ -1,6 +1,8 @@
 package com.aryan.reader.shared
 
 import androidx.compose.ui.graphics.Color
+import com.aryan.reader.shared.pdf.SharedPdfHighlighterPalette
+import com.aryan.reader.shared.reader.ReaderSettings
 
 data class BannerMessage(
     val message: String,
@@ -104,7 +106,7 @@ data class SharedReaderScreenState(
     val pinnedLibraryBookIds: Set<String> = emptySet(),
     val libraryFilters: LibraryFilters = LibraryFilters(),
     val recentFilesLimit: Int = 0,
-    val isTabsEnabled: Boolean = false,
+    val isTabsEnabled: Boolean = true,
     val openTabIds: List<String> = emptyList(),
     val openTabs: List<BookItem> = emptyList(),
     val activeTabBookId: String? = null,
@@ -117,9 +119,12 @@ data class SharedReaderScreenState(
     val appTextDimFactorDark: Float = 1.0f,
     val appSeedColor: Color? = null,
     val customAppThemes: List<CustomAppTheme> = emptyList(),
+    val readerDefaultSettings: ReaderSettings = ReaderSettings(),
+    val pdfReaderDefaultSettings: ReaderSettings = ReaderSettings(themeId = "no_theme"),
     val allTags: List<Tag> = emptyList(),
     val showTagSelectionDialogFor: Set<String> = emptySet(),
     val readerToolbarPreferences: ReaderToolbarPreferences = ReaderToolbarPreferences(),
     val readerHighlightPalette: ReaderHighlightPalette = ReaderHighlightPalette(),
+    val pdfHighlighterPalette: SharedPdfHighlighterPalette = SharedPdfHighlighterPalette(),
     val readerTtsReplacementPreferences: ReaderTtsReplacementPreferences = ReaderTtsReplacementPreferences()
 )

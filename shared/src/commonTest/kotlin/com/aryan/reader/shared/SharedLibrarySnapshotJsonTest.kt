@@ -1,7 +1,9 @@
 package com.aryan.reader.shared
 
 import androidx.compose.ui.graphics.Color
+import com.aryan.reader.shared.pdf.SharedPdfReaderViewport
 import com.aryan.reader.shared.reader.ReaderBookmark
+import com.aryan.reader.shared.reader.ReaderPageSpreadMode
 import com.aryan.reader.shared.reader.ReaderReadingMode
 import com.aryan.reader.shared.reader.ReaderSettings
 import com.aryan.reader.shared.reader.SharedReaderTextAlign
@@ -26,14 +28,29 @@ class SharedLibrarySnapshotJsonTest {
                     coverImagePath = "C:/Covers/book.png",
                     title = "Book",
                     author = "Ada",
+                    description = "<p>A compact shared summary.</p>",
+                    originalTitle = "Original Book",
+                    originalAuthor = "Original Ada",
+                    originalSeriesName = "Original Series",
+                    originalSeriesIndex = 1.0,
+                    originalDescription = "Original summary",
                     progressPercentage = 42f,
                     fileSize = 99L,
+                    fileContentModifiedTimestamp = 123_456L,
                     sourceFolder = "C:/Books",
                     folderTextMetadataParsed = true,
                     seriesName = "Series",
                     seriesIndex = 2.0,
                     tags = listOf(tag),
                     lastPageIndex = 4,
+                    readerPosition = ReaderLocator(
+                        chapterIndex = 1,
+                        pageIndex = 4,
+                        startOffset = 220,
+                        endOffset = 220,
+                        textQuote = "Precise place",
+                        cfi = "desktop:1:220:220"
+                    ),
                     readerSettings = ReaderSettings(
                         fontSize = 22,
                         lineSpacing = 1.7f,
@@ -56,6 +73,9 @@ class SharedLibrarySnapshotJsonTest {
                         systemUiMode = SystemUiMode.HIDDEN,
                         pageInfoMode = PageInfoMode.SYNC,
                         pageInfoPosition = PageInfoPosition.TOP,
+                        pageSpreadMode = ReaderPageSpreadMode.TWO_PAGE,
+                        pdfVerticalPageGapVisible = false,
+                        pdfPageNumberOverlayVisible = false,
                         seamlessChapterNavigation = false,
                         chapterTurnDragMultiplier = 1.6f
                     ),
@@ -91,6 +111,15 @@ class SharedLibrarySnapshotJsonTest {
                                 cfi = "desktop:0:128:144"
                             )
                         )
+                    ),
+                    pdfReaderViewport = SharedPdfReaderViewport(
+                        pageIndex = 4,
+                        displayMode = PdfDisplayMode.VERTICAL_SCROLL,
+                        zoom = 1.8f,
+                        horizontalScrollOffset = 90,
+                        paginatedVerticalScrollOffset = 140,
+                        verticalFirstPageIndex = 3,
+                        verticalFirstPageScrollOffset = 44
                     )
                 )
             ),
@@ -123,6 +152,8 @@ class SharedLibrarySnapshotJsonTest {
             customAppThemes = listOf(
                 CustomAppTheme(id = "forest", name = "Forest", seedColor = Color(0xFF006C4C))
             ),
+            readerDefaultSettings = ReaderSettings(themeId = "sepia"),
+            pdfReaderDefaultSettings = ReaderSettings(themeId = "reverse"),
             readerToolbarPreferences = ReaderToolbarPreferences(
                 hiddenToolIds = setOf(ReaderTool.SEARCH.id),
                 toolOrder = listOf(ReaderTool.BOOKMARK, ReaderTool.THEME, ReaderTool.SEARCH),
@@ -170,6 +201,55 @@ class SharedLibrarySnapshotJsonTest {
     }
 
     @Test
+    fun `missing tab setting defaults to enabled for new desktop snapshots`() {
+        val decoded = SharedLibrarySnapshotJson.decodeOrEmpty("""{"schemaVersion":14}""")
+
+        assertTrue(decoded.isTabsEnabled)
+    }
+
+    @Test
+    fun `legacy untouched epub default settings migrate to vertical mode`() {
+        val decoded = SharedLibrarySnapshotJson.decodeOrEmpty(
+            """
+            {
+              "schemaVersion": 16,
+              "readerDefaultSettings": {
+                "readingMode": "PAGINATED"
+              }
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(ReaderReadingMode.VERTICAL, decoded.readerDefaultSettings.readingMode)
+    }
+
+    @Test
+    fun `legacy reader settings default pdf visual options to current behavior`() {
+        val decoded = SharedLibrarySnapshotJson.decodeOrEmpty(
+            """
+            {
+              "books": [
+                {
+                  "id": "book",
+                  "path": "C:/Books/book.pdf",
+                  "type": "PDF",
+                  "displayName": "book.pdf",
+                  "timestamp": 10,
+                  "readerSettings": {
+                    "themeId": "no_theme"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+        val settings = decoded.books.single().readerSettings ?: error("Expected settings")
+
+        assertTrue(settings.pdfVerticalPageGapVisible)
+        assertTrue(settings.pdfPageNumberOverlayVisible)
+    }
+
+    @Test
     fun `legacy snapshot hides imported only books from recent home`() {
         val decoded = SharedLibrarySnapshotJson.decodeOrEmpty(
             """
@@ -200,5 +280,37 @@ class SharedLibrarySnapshotJsonTest {
 
         assertFalse(decoded.books.first { it.id == "imported" }.isRecent)
         assertTrue(decoded.books.first { it.id == "opened" }.isRecent)
+    }
+
+    @Test
+    fun `synced folder allowed types exclude unknown while preserving valid selections`() {
+        val decoded = SharedLibrarySnapshotJson.decodeOrEmpty(
+            """
+            {
+              "syncedFolders": [
+                {
+                  "uriString": "C:/Books",
+                  "name": "Books",
+                  "lastScanTime": 12,
+                  "allowedFileTypes": ["PDF", "UNKNOWN", "EPUB"]
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+        val folder = decoded.syncedFolders.single()
+
+        assertEquals(setOf(FileType.PDF, FileType.EPUB), folder.allowedFileTypes)
+        assertFalse(FileType.UNKNOWN in folder.allowedFileTypes)
+
+        val encoded = SharedLibrarySnapshotJson.encode(
+            SharedLibrarySnapshot(
+                syncedFolders = listOf(
+                    SyncedFolder("C:/Books", "Books", lastScanTime = 12L, allowedFileTypes = setOf(FileType.PDF, FileType.UNKNOWN))
+                )
+            )
+        )
+
+        assertFalse("\"UNKNOWN\"" in encoded)
     }
 }

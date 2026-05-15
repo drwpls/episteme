@@ -47,12 +47,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,6 +86,9 @@ fun SharedOpdsScreen(
     onReadBook: (BookItem) -> Unit,
     onStreamBook: (OpdsEntry, OpdsCatalog?) -> Unit,
     onClearError: () -> Unit,
+    coverContent: @Composable (OpdsEntry, Modifier) -> Unit = { entry, coverModifier ->
+        SharedOpdsCoverPlaceholder(entry, coverModifier)
+    },
     modifier: Modifier = Modifier
 ) {
     var selectedEntry by remember { mutableStateOf<OpdsEntry?>(null) }
@@ -121,7 +122,8 @@ fun SharedOpdsScreen(
                 onDownloadBook = onDownloadBook,
                 onReadBook = onReadBook,
                 onStreamBook = { entry -> onStreamBook(entry, state.currentCatalog) },
-                onEntrySelected = { selectedEntry = it }
+                onEntrySelected = { selectedEntry = it },
+                coverContent = coverContent
             )
         }
 
@@ -213,7 +215,8 @@ fun SharedOpdsScreen(
             onSearch = { query ->
                 onSearch(query)
                 selectedEntry = null
-            }
+            },
+            coverContent = coverContent
         )
     }
 }
@@ -273,7 +276,8 @@ private fun SharedOpdsFeedView(
     onDownloadBook: (OpdsEntry, OpdsAcquisition) -> Unit,
     onReadBook: (BookItem) -> Unit,
     onStreamBook: (OpdsEntry) -> Unit,
-    onEntrySelected: (OpdsEntry) -> Unit
+    onEntrySelected: (OpdsEntry) -> Unit,
+    coverContent: @Composable (OpdsEntry, Modifier) -> Unit
 ) {
     var showSearch by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
@@ -298,7 +302,7 @@ private fun SharedOpdsFeedView(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                     if (showSearch) {
-                        OutlinedTextField(
+                        SharedStableOutlinedTextField(
                             value = query,
                             onValueChange = { query = it },
                             placeholder = { Text("Search catalog") },
@@ -380,12 +384,6 @@ private fun SharedOpdsFeedView(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 itemsIndexed(entries, key = { index, entry -> "${entry.id}_$index" }) { index, entry ->
-                    val nextUrl = state.currentFeed?.nextUrl
-                    if (index == entries.lastIndex && nextUrl != null) {
-                        LaunchedEffect(index, nextUrl) {
-                            onLoadNextPage()
-                        }
-                    }
                     if (entry.isNavigation) {
                         SharedOpdsNavigationCard(entry, onOpenFeedUrl)
                     } else {
@@ -396,8 +394,21 @@ private fun SharedOpdsFeedView(
                             onDownloadBook = { acquisition -> onDownloadBook(entry, acquisition) },
                             onReadBook = onReadBook,
                             onStreamBook = { onStreamBook(entry) },
-                            onClick = { onEntrySelected(entry) }
+                            onClick = { onEntrySelected(entry) },
+                            coverContent = coverContent
                         )
+                    }
+                }
+                state.currentFeed?.nextUrl?.let { nextUrl ->
+                    item(key = "load_more_$nextUrl") {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            OutlinedButton(
+                                onClick = onLoadNextPage,
+                                enabled = !state.isLoading
+                            ) {
+                                Text(if (state.isLoading) "Loading..." else "Load more")
+                            }
+                        }
                     }
                 }
             }
@@ -567,7 +578,8 @@ private fun SharedOpdsBookCard(
     onDownloadBook: (OpdsAcquisition) -> Unit,
     onReadBook: (BookItem) -> Unit,
     onStreamBook: () -> Unit,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    coverContent: @Composable (OpdsEntry, Modifier) -> Unit
 ) {
     val uniqueAcquisitions = remember(entry.acquisitions) {
         entry.acquisitions.distinctBy { it.formatName }.sortedByDescending { it.priority }
@@ -582,15 +594,7 @@ private fun SharedOpdsBookCard(
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Box(
-                modifier = Modifier
-                    .size(width = 70.dp, height = 100.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(entry.title.take(1).uppercase(), style = MaterialTheme.typography.headlineMedium)
-            }
+            coverContent(entry, Modifier.size(width = 70.dp, height = 100.dp))
             Column(Modifier.weight(1f)) {
                 Text(entry.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 entry.author?.let {
@@ -687,7 +691,8 @@ private fun SharedOpdsEntryDetailsDialog(
     onReadBook: (BookItem) -> Unit,
     onStreamBook: () -> Unit,
     onOpenFeedUrl: (String) -> Unit,
-    onSearch: (String) -> Unit
+    onSearch: (String) -> Unit,
+    coverContent: @Composable (OpdsEntry, Modifier) -> Unit
 ) {
     val uniqueAcquisitions = remember(entry.acquisitions) {
         entry.acquisitions.distinctBy { it.formatName }.sortedByDescending { it.priority }
@@ -709,6 +714,24 @@ private fun SharedOpdsEntryDetailsDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.Top) {
+                    coverContent(entry, Modifier.size(width = 96.dp, height = 140.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        entry.series?.takeIf { it.isNotBlank() }?.let { series ->
+                            Text(
+                                text = if (entry.seriesIndex.isNullOrBlank()) series else "$series #${entry.seriesIndex}",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        val secondary = listOfNotNull(
+                            entry.publisher?.takeIf { it.isNotBlank() }?.let { "Publisher: $it" },
+                            entry.published?.takeIf { it.isNotBlank() }?.substringBefore("T")?.let { "Published: $it" },
+                            entry.language?.takeIf { it.isNotBlank() }?.uppercase()?.let { "Language: $it" }
+                        )
+                        secondary.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                }
                 localLibraryBook?.let { book ->
                     Button(onClick = { onReadBook(book) }, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Default.Check, contentDescription = null)
@@ -737,14 +760,6 @@ private fun SharedOpdsEntryDetailsDialog(
                         }
                     }
                 }
-                entry.series?.takeIf { it.isNotBlank() }?.let { series ->
-                    Text(
-                        text = if (entry.seriesIndex.isNullOrBlank()) series else "$series #${entry.seriesIndex}",
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
                 if (entry.authors.isNotEmpty()) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("Authors", style = MaterialTheme.typography.labelLarge)
@@ -767,12 +782,6 @@ private fun SharedOpdsEntryDetailsDialog(
                         }
                     }
                 }
-                val secondary = listOfNotNull(
-                    entry.publisher?.takeIf { it.isNotBlank() }?.let { "Publisher: $it" },
-                    entry.published?.takeIf { it.isNotBlank() }?.substringBefore("T")?.let { "Published: $it" },
-                    entry.language?.takeIf { it.isNotBlank() }?.uppercase()?.let { "Language: $it" }
-                )
-                secondary.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 val summary = SharedOpdsText.cleanSummary(entry.summary)
                 if (summary.isNotBlank()) {
                     Text("Synopsis", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
@@ -805,16 +814,17 @@ private fun SharedOpdsCatalogDialog(
         title = { Text(if (isEditMode) "Edit catalog" else "Add OPDS catalog") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Catalog name") }, singleLine = true)
-                OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("URL") }, singleLine = true)
+                SharedStableOutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Catalog name") }, singleLine = true, selectionKey = catalog?.id ?: "new:title")
+                SharedStableOutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("URL") }, singleLine = true, selectionKey = catalog?.id ?: "new:url")
                 Text("Authentication optional", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Username") }, singleLine = true)
-                OutlinedTextField(
+                SharedStableOutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Username") }, singleLine = true, selectionKey = catalog?.id ?: "new:username")
+                SharedStableOutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
                     label = { Text("Password") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation()
+                    visualTransformation = PasswordVisualTransformation(),
+                    selectionKey = catalog?.id ?: "new:password"
                 )
             }
         },
@@ -837,5 +847,17 @@ private fun SharedOpdsCatalogDialog(
 private fun OpdsEntry.findLocalBook(localLibraryBooks: List<BookItem>): BookItem? {
     return localLibraryBooks.firstOrNull {
         it.title.equals(title, ignoreCase = true) || it.displayName.equals(title, ignoreCase = true)
+    }
+}
+
+@Composable
+private fun SharedOpdsCoverPlaceholder(entry: OpdsEntry, modifier: Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(entry.title.take(1).uppercase(), style = MaterialTheme.typography.headlineMedium)
     }
 }

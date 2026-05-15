@@ -47,6 +47,8 @@ import com.aryan.reader.areReaderAiFeaturesEnabled
 import com.aryan.reader.epubreader.SystemUiMode
 import kotlin.collections.isNotEmpty
 
+internal val PdfTabStripHeight = 44.dp
+
 private val pdfToolbarTools = setOf(
     PdfReaderTool.DICTIONARY,
     PdfReaderTool.THEME,
@@ -57,7 +59,8 @@ private val pdfToolbarTools = setOf(
     PdfReaderTool.HIGHLIGHT_ALL,
     PdfReaderTool.AI_FEATURES,
     PdfReaderTool.EDIT_MODE,
-    PdfReaderTool.TTS_CONTROLS
+    PdfReaderTool.TTS_CONTROLS,
+    PdfReaderTool.SCREEN_ORIENTATION
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -81,6 +84,7 @@ internal fun PdfTopBar(
     isScrollLocked: Boolean,
     isEditMode: Boolean,
     displayMode: DisplayMode,
+    isRightToLeftPagination: Boolean,
     isKeepScreenOn: Boolean,
     isTtsSessionActive: Boolean,
     isBookmarked: Boolean,
@@ -101,6 +105,7 @@ internal fun PdfTopBar(
     onShowCustomizeTools: () -> Unit,
     onShowOcrLanguage: () -> Unit,
     onShowVisualOptions: () -> Unit,
+    onShowScreenOrientation: () -> Unit,
     onShowSlider: () -> Unit,
     onShowToc: () -> Unit,
     onSearchClick: () -> Unit,
@@ -114,6 +119,7 @@ internal fun PdfTopBar(
     tapToNavigateEnabled: Boolean,
     onToggleTapToNavigate: () -> Unit,
     onChangeDisplayMode: (DisplayMode) -> Unit,
+    onSetRightToLeftPagination: (Boolean) -> Unit,
     onToggleKeepScreenOn: () -> Unit,
     onStartAutoScroll: () -> Unit,
     onShowTtsSettings: () -> Unit,
@@ -262,6 +268,13 @@ internal fun PdfTopBar(
                                     ) {
                                         Icon(if (isTtsSessionActive) painterResource(id = R.drawable.close) else painterResource(id = R.drawable.text_to_speech), contentDescription = if (isTtsSessionActive) stringResource(R.string.content_desc_stop_tts) else stringResource(R.string.content_desc_start_tts), tint = if (isTtsSessionActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
+                                    PdfReaderTool.SCREEN_ORIENTATION -> TooltipIconButton(
+                                        text = stringResource(R.string.menu_screen_orientation),
+                                        description = stringResource(R.string.visual_options_screen_orientation_desc),
+                                        onClick = onShowScreenOrientation
+                                    ) {
+                                        Icon(Icons.Default.ScreenRotation, contentDescription = stringResource(R.string.menu_screen_orientation), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                     else -> Unit
                                 }
                             }
@@ -281,11 +294,17 @@ internal fun PdfTopBar(
                         Box {
                             var showMoreMenu by remember { mutableStateOf(false) }
                             var showHiddenToolsExpanded by remember { mutableStateOf(false) }
+                            var showReadingModeExpanded by remember { mutableStateOf(false) }
+                            var showTtsSettingsExpanded by remember { mutableStateOf(false) }
+                            var showFileActionsExpanded by remember { mutableStateOf(false) }
                             TooltipIconButton(
                                 text = stringResource(R.string.tooltip_more_options),
                                 description = stringResource(R.string.tooltip_more_options_desc),
                                 onClick = {
                                     showHiddenToolsExpanded = false
+                                    showReadingModeExpanded = false
+                                    showTtsSettingsExpanded = false
+                                    showFileActionsExpanded = false
                                     showMoreMenu = true
                                 }) {
                                 Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.tooltip_more_options))
@@ -295,6 +314,9 @@ internal fun PdfTopBar(
                                 expanded = showMoreMenu,
                                 onDismissRequest = {
                                     showHiddenToolsExpanded = false
+                                    showReadingModeExpanded = false
+                                    showTtsSettingsExpanded = false
+                                    showFileActionsExpanded = false
                                     showMoreMenu = false
                                 }
                             ) {
@@ -340,7 +362,8 @@ internal fun PdfTopBar(
                                                 onToggleHighlights = onToggleHighlights,
                                                 onShowAiHub = onShowAiHub,
                                                 onToggleEditMode = onToggleEditMode,
-                                                onToggleTts = onToggleTts
+                                                onToggleTts = onToggleTts,
+                                                onShowScreenOrientation = onShowScreenOrientation
                                             )
                                         }
                                     }
@@ -366,18 +389,52 @@ internal fun PdfTopBar(
 
                                 if (!hiddenTools.contains(PdfReaderTool.READING_MODE.name)) {
                                     DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.menu_reading_mode_vertical)) },
-                                        enabled = !isTtsSessionActive,
-                                        onClick = { onChangeDisplayMode(DisplayMode.VERTICAL_SCROLL); showMoreMenu = false },
-                                        trailingIcon = { if (displayMode == DisplayMode.VERTICAL_SCROLL) Icon(Icons.Filled.Check, contentDescription = stringResource(R.string.content_desc_selected)) }
+                                        text = { Text(stringResource(R.string.menu_change_reading_mode)) },
+                                        onClick = { showReadingModeExpanded = !showReadingModeExpanded },
+                                        trailingIcon = {
+                                            Icon(
+                                                Icons.Default.ArrowDropDown,
+                                                contentDescription = null,
+                                                modifier = Modifier.rotate(if (showReadingModeExpanded) 180f else 0f)
+                                            )
+                                        }
                                     )
-                                    HorizontalDivider()
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.menu_reading_mode_paginated)) },
-                                        enabled = !isTtsSessionActive,
-                                        onClick = { onChangeDisplayMode(DisplayMode.PAGINATION); showMoreMenu = false },
-                                        trailingIcon = { if (displayMode == DisplayMode.PAGINATION) Icon(Icons.Filled.Check, contentDescription = stringResource(R.string.content_desc_selected)) }
-                                    )
+                                    if (showReadingModeExpanded) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.menu_reading_mode_vertical)) },
+                                            enabled = !isTtsSessionActive,
+                                            onClick = { onChangeDisplayMode(DisplayMode.VERTICAL_SCROLL); showMoreMenu = false },
+                                            trailingIcon = { if (displayMode == DisplayMode.VERTICAL_SCROLL) Icon(Icons.Filled.Check, contentDescription = stringResource(R.string.content_desc_selected)) }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.menu_reading_mode_paginated)) },
+                                            enabled = !isTtsSessionActive,
+                                            onClick = {
+                                                onSetRightToLeftPagination(false)
+                                                onChangeDisplayMode(DisplayMode.PAGINATION)
+                                                showMoreMenu = false
+                                            },
+                                            trailingIcon = {
+                                                if (displayMode == DisplayMode.PAGINATION && !isRightToLeftPagination) {
+                                                    Icon(Icons.Filled.Check, contentDescription = stringResource(R.string.content_desc_selected))
+                                                }
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.menu_right_to_left_pagination)) },
+                                            enabled = !isTtsSessionActive,
+                                            onClick = {
+                                                onSetRightToLeftPagination(true)
+                                                onChangeDisplayMode(DisplayMode.PAGINATION)
+                                                showMoreMenu = false
+                                            },
+                                            trailingIcon = {
+                                                if (displayMode == DisplayMode.PAGINATION && isRightToLeftPagination) {
+                                                    Icon(Icons.Filled.Check, contentDescription = stringResource(R.string.content_desc_selected))
+                                                }
+                                            }
+                                        )
+                                    }
                                     HorizontalDivider()
                                 }
 
@@ -419,22 +476,39 @@ internal fun PdfTopBar(
                                     HorizontalDivider()
                                 }
 
-                                if (!hiddenTools.contains(PdfReaderTool.TTS_SETTINGS.name)) {
+                                val showTtsVoiceSettings = !hiddenTools.contains(PdfReaderTool.TTS_SETTINGS.name)
+                                val showTtsReplacements = !hiddenTools.contains(PdfReaderTool.TTS_REPLACEMENTS.name)
+                                if (showTtsVoiceSettings || showTtsReplacements) {
                                     DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.menu_tts_voice_settings)) },
-                                        enabled = !isTtsSessionActive,
-                                        onClick = { showMoreMenu = false; onShowTtsSettings() },
-                                        leadingIcon = { Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(20.dp)) }
+                                        text = { Text(stringResource(R.string.menu_tts_settings)) },
+                                        onClick = { showTtsSettingsExpanded = !showTtsSettingsExpanded },
+                                        leadingIcon = { Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                        trailingIcon = {
+                                            Icon(
+                                                Icons.Default.ArrowDropDown,
+                                                contentDescription = null,
+                                                modifier = Modifier.rotate(if (showTtsSettingsExpanded) 180f else 0f)
+                                            )
+                                        }
                                     )
+                                    if (showTtsSettingsExpanded) {
+                                        if (showTtsVoiceSettings) {
+                                            DropdownMenuItem(
+                                                text = { Text(stringResource(R.string.menu_tts_voice_settings)) },
+                                                enabled = !isTtsSessionActive,
+                                                onClick = { showMoreMenu = false; onShowTtsSettings() },
+                                                leadingIcon = { Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(20.dp)) }
+                                            )
+                                        }
+                                        if (showTtsReplacements) {
+                                            DropdownMenuItem(
+                                                text = { Text(stringResource(R.string.menu_tts_word_replacements)) },
+                                                onClick = { showMoreMenu = false; onShowTtsReplacements() },
+                                                leadingIcon = { Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(20.dp)) }
+                                            )
+                                        }
+                                    }
                                     HorizontalDivider()
-                                }
-
-                                if (!hiddenTools.contains(PdfReaderTool.TTS_REPLACEMENTS.name)) {
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.menu_tts_word_replacements)) },
-                                        onClick = { showMoreMenu = false; onShowTtsReplacements() },
-                                        leadingIcon = { Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(20.dp)) }
-                                    )
                                 }
 
                                 if (!hiddenTools.contains(PdfReaderTool.BOOKMARK.name)) {
@@ -462,7 +536,7 @@ internal fun PdfTopBar(
 
                                 if (!hiddenTools.contains(PdfReaderTool.REFLOW.name)) {
                                     DropdownMenuItem(
-                                        text = { Text(when { isReflowingThisBook -> stringResource(R.string.generating_reflow_progress); hasReflowFile -> stringResource(R.string.action_open_text_view); else -> stringResource(R.string.action_generate_text_view) }) },
+                                        text = { Text(when { isReflowingThisBook -> stringResource(R.string.generating_text_view); hasReflowFile -> stringResource(R.string.action_open_text_view); else -> stringResource(R.string.action_generate_text_view) }) },
                                         enabled = isPdfDocumentLoaded && !isReflowingThisBook,
                                         onClick = { showMoreMenu = false; onReflowAction() },
                                         leadingIcon = { Icon(painterResource(id = R.drawable.format_size), contentDescription = null, modifier = Modifier.size(20.dp)) }
@@ -470,28 +544,45 @@ internal fun PdfTopBar(
                                     HorizontalDivider()
                                 }
 
-                                if (!hiddenTools.contains(PdfReaderTool.SHARE.name)) {
+                                val showShareAction = !hiddenTools.contains(PdfReaderTool.SHARE.name)
+                                val showSaveCopyAction = effectiveFileType == FileType.PDF && !hiddenTools.contains(PdfReaderTool.SAVE_COPY.name)
+                                val showPrintAction = effectiveFileType == FileType.PDF && !hiddenTools.contains(PdfReaderTool.PRINT.name)
+                                if (showShareAction || showSaveCopyAction || showPrintAction) {
                                     DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.action_share)) },
-                                        onClick = { showMoreMenu = false; onShare() },
-                                        leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) }
+                                        text = { Text(stringResource(R.string.menu_share_save_print)) },
+                                        onClick = { showFileActionsExpanded = !showFileActionsExpanded },
+                                        leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                                        trailingIcon = {
+                                            Icon(
+                                                Icons.Default.ArrowDropDown,
+                                                contentDescription = null,
+                                                modifier = Modifier.rotate(if (showFileActionsExpanded) 180f else 0f)
+                                            )
+                                        }
                                     )
-                                }
-
-                                if (effectiveFileType == FileType.PDF && !hiddenTools.contains(PdfReaderTool.SAVE_COPY.name)) {
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.action_save_copy_to_device)) },
-                                        onClick = { showMoreMenu = false; onSaveCopy() },
-                                        leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) }
-                                    )
-                                }
-
-                                if (effectiveFileType == FileType.PDF && !hiddenTools.contains(PdfReaderTool.PRINT.name)) {
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.action_print)) },
-                                        onClick = { showMoreMenu = false; onPrint() },
-                                        leadingIcon = { Icon(painterResource(id = R.drawable.print), contentDescription = null, modifier = Modifier.size(20.dp)) }
-                                    )
+                                    if (showFileActionsExpanded) {
+                                        if (showShareAction) {
+                                            DropdownMenuItem(
+                                                text = { Text(stringResource(R.string.action_share)) },
+                                                onClick = { showMoreMenu = false; onShare() },
+                                                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) }
+                                            )
+                                        }
+                                        if (showSaveCopyAction) {
+                                            DropdownMenuItem(
+                                                text = { Text(stringResource(R.string.action_save_copy_to_device)) },
+                                                onClick = { showMoreMenu = false; onSaveCopy() },
+                                                leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) }
+                                            )
+                                        }
+                                        if (showPrintAction) {
+                                            DropdownMenuItem(
+                                                text = { Text(stringResource(R.string.action_print)) },
+                                                onClick = { showMoreMenu = false; onPrint() },
+                                                leadingIcon = { Icon(painterResource(id = R.drawable.print), contentDescription = null, modifier = Modifier.size(20.dp)) }
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -499,7 +590,7 @@ internal fun PdfTopBar(
                 }
                 if (isTabsEnabled && openTabs.isNotEmpty() && effectiveFileType == FileType.PDF) {
                     LazyRow(
-                        modifier = Modifier.fillMaxWidth().height(44.dp).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                        modifier = Modifier.fillMaxWidth().height(PdfTabStripHeight).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
                         verticalAlignment = Alignment.Bottom
                     ) {
                         items(openTabs, key = { it.bookId }) { tab ->
@@ -509,7 +600,7 @@ internal fun PdfTopBar(
 
                             Row(
                                 modifier = Modifier
-                                    .height(if (isSelected) 44.dp else 36.dp)
+                                    .height(if (isSelected) PdfTabStripHeight else 36.dp)
                                     .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
                                     .background(bgColor)
                                     .clickable { onTabClick(tab.bookId) }
@@ -564,7 +655,8 @@ private fun HiddenPdfToolMenuItem(
     onToggleHighlights: () -> Unit,
     onShowAiHub: () -> Unit,
     onToggleEditMode: () -> Unit,
-    onToggleTts: () -> Unit
+    onToggleTts: () -> Unit,
+    onShowScreenOrientation: () -> Unit
 ) {
     val enabled = when (tool) {
         PdfReaderTool.SLIDER,
@@ -588,6 +680,7 @@ private fun HiddenPdfToolMenuItem(
                 PdfReaderTool.AI_FEATURES -> onShowAiHub()
                 PdfReaderTool.EDIT_MODE -> onToggleEditMode()
                 PdfReaderTool.TTS_CONTROLS -> onToggleTts()
+                PdfReaderTool.SCREEN_ORIENTATION -> onShowScreenOrientation()
                 else -> Unit
             }
         },
@@ -606,6 +699,7 @@ private fun HiddenPdfToolMenuItem(
                 PdfReaderTool.AI_FEATURES -> Icon(painterResource(id = R.drawable.ai), contentDescription = null, modifier = Modifier.size(20.dp))
                 PdfReaderTool.EDIT_MODE -> Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(20.dp), tint = if (isEditMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 PdfReaderTool.TTS_CONTROLS -> Icon(if (isTtsSessionActive) painterResource(id = R.drawable.close) else painterResource(id = R.drawable.text_to_speech), contentDescription = null, modifier = Modifier.size(20.dp), tint = if (isTtsSessionActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                PdfReaderTool.SCREEN_ORIENTATION -> Icon(Icons.Default.ScreenRotation, contentDescription = null, modifier = Modifier.size(20.dp))
                 else -> Icon(Icons.Default.MoreVert, contentDescription = null, modifier = Modifier.size(20.dp))
             }
         }
@@ -766,6 +860,8 @@ fun PdfBottomBar(
     onShowAiHub: () -> Unit,
     onToggleEditMode: () -> Unit,
     onToggleTts: () -> Unit,
+    onShowScreenOrientation: () -> Unit,
+    showBubbleZoom: Boolean,
     isBubbleZoomModeActive: Boolean,
     onToggleBubbleZoom: () -> Unit
 ) {
@@ -868,11 +964,18 @@ fun PdfBottomBar(
                             ) {
                                 Icon(if (isTtsSessionActive) painterResource(id = R.drawable.close) else painterResource(id = R.drawable.text_to_speech), contentDescription = if (isTtsSessionActive) stringResource(R.string.content_desc_stop_tts) else stringResource(R.string.content_desc_start_tts), tint = if (isTtsSessionActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                             }
+                            PdfReaderTool.SCREEN_ORIENTATION -> TooltipIconButton(
+                                text = stringResource(R.string.menu_screen_orientation),
+                                description = stringResource(R.string.visual_options_screen_orientation_desc),
+                                onClick = onShowScreenOrientation
+                            ) {
+                                Icon(Icons.Default.ScreenRotation, contentDescription = stringResource(R.string.menu_screen_orientation), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             else -> Unit
                         }
                     }
 
-                if (BuildConfig.FLAVOR != "oss") {
+                if (BuildConfig.FLAVOR != "oss" && showBubbleZoom) {
                     TooltipIconButton(
                         text = if (isBubbleZoomModeActive) stringResource(R.string.action_exit_smart_zoom) else stringResource(R.string.action_smart_comic_zoom),
                         description = stringResource(R.string.desc_toggle_smart_comic_zoom),

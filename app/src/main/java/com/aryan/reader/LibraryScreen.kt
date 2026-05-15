@@ -79,6 +79,7 @@ import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -133,6 +134,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.util.UnstableApi
+import androidx.navigation.NavHostController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.aryan.reader.data.RecentFileItem
@@ -148,7 +150,6 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import org.jsoup.Jsoup
 import timber.log.Timber
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -163,6 +164,7 @@ private fun getBookCountString(count: Int): String {
 @Composable
 fun LibraryScreen(
     viewModel: MainViewModel,
+    navController: NavHostController,
 ) {
     val compStart = remember { System.currentTimeMillis() }
     LaunchedEffect(Unit) {
@@ -170,14 +172,13 @@ fun LibraryScreen(
     }
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val screenModel = remember(uiState) { uiState.toLibraryScreenModel() }
-    val selectedItems = screenModel.selectedItems
-    val isContextualModeActive = screenModel.isContextualModeActive
-    val selectedShelves = screenModel.selectedShelves
-    val isShelfContextualModeActive = screenModel.isShelfContextualModeActive
-    val sortOrder = screenModel.sortOrder
-    val shelves = screenModel.shelves
-    val rawLibraryFiles = screenModel.rawLibraryFiles
+    val selectedItems = uiState.contextualActionItems
+    val isContextualModeActive = selectedItems.isNotEmpty()
+    val selectedShelves = uiState.contextualActionShelfIds
+    val isShelfContextualModeActive = selectedShelves.isNotEmpty()
+    val sortOrder = uiState.sortOrder
+    val shelves = uiState.shelves
+    val rawLibraryFiles = uiState.rawLibraryFiles
     val tabTitles = remember {
         buildList {
             add(context.getString(R.string.tab_all_books))
@@ -193,13 +194,13 @@ fun LibraryScreen(
         pageCount = { tabTitles.size }
     )
 
-    val containsFolderItems = screenModel.containsFolderItemsInSelection
+    val containsFolderItems = selectedItems.any { it.sourceFolderUri != null }
 
     val scope = rememberCoroutineScope()
     var showFilterSheet by remember { mutableStateOf(false) }
 
-    val isSearchActive = screenModel.isSearchActive
-    val searchQuery = screenModel.searchQuery
+    val isSearchActive = uiState.isSearchActive
+    val searchQuery = uiState.searchQuery
 
     val pickFolderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -341,7 +342,8 @@ fun LibraryScreen(
                     catalogId = catalog?.id
                 )
             },
-            onDeleteCatalogStreams = viewModel::deleteStreamedBooksForCatalog
+            onDeleteCatalogStreams = viewModel::deleteStreamedBooksForCatalog,
+            onSettingsClick = { navController.navigate(AppDestinations.SETTINGS_SCREEN_ROUTE) }
         )
 
 
@@ -394,8 +396,14 @@ fun LibraryScreen(
                         showInfoDialog = false
                         itemForInfoDialog = null
                     },
-                    onUpdateName = { newName ->
-                        viewModel.updateCustomName(item.bookId, newName)
+                    onSaveMetadata = { metadata ->
+                        viewModel.updateBookMetadata(item.bookId, metadata)
+                    },
+                    onSaveDisplayName = { name ->
+                        viewModel.updateCustomName(item.bookId, name)
+                    },
+                    onRestoreMetadata = {
+                        viewModel.restoreOriginalBookMetadata(item.bookId)
                     },
                     onOpenTags = { viewModel.openTagSelection(setOf(item.bookId)) }
                 )
@@ -516,7 +524,9 @@ fun ShelfScreen(
                 FileInfoDialog(
                     item = item,
                     onDismiss = { showInfoDialog = false; itemForInfoDialog = null },
-                    onUpdateName = { newName -> viewModel.updateCustomName(item.bookId, newName) },
+                    onSaveMetadata = { metadata -> viewModel.updateBookMetadata(item.bookId, metadata) },
+                    onSaveDisplayName = { name -> viewModel.updateCustomName(item.bookId, name) },
+                    onRestoreMetadata = { viewModel.restoreOriginalBookMetadata(item.bookId) },
                     onOpenTags = { viewModel.openTagSelection(setOf(item.bookId)) }
                 )
             }
@@ -577,6 +587,7 @@ fun LibraryScreenContent(
     onOpdsBookDownloaded: (Uri, String) -> Unit,
     onStreamOpdsBook: (OpdsEntry, OpdsCatalog?) -> Unit,
     onDeleteCatalogStreams: (String) -> Unit,
+    onSettingsClick: () -> Unit,
 ) {
     val isBookContextualModeActive = selectedItems.isNotEmpty()
     val isShelfContextualModeActive = selectedShelves.isNotEmpty()
@@ -710,6 +721,9 @@ fun LibraryScreenContent(
                                 IconButton(onClick = { onSearchActiveChange(true) }) {
                                     Icon(Icons.Default.Search, contentDescription = stringResource(R.string.action_search))
                                 }
+                            }
+                            IconButton(onClick = onSettingsClick) {
+                                Icon(Icons.Default.Settings, contentDescription = "Settings")
                             }
                         }
                     )
@@ -1442,8 +1456,6 @@ private fun AddBooksModeScreen(
 
 @Composable
 private fun ShelfCover(shelf: Shelf) {
-    val context = LocalContext.current
-    val placeholder = R.drawable.epub_placeholder
     val booksForCovers = shelf.books.take(4).reversed()
     val coverWidth = 52.dp
     val coverHeight = 75.dp
@@ -1457,22 +1469,24 @@ private fun ShelfCover(shelf: Shelf) {
         contentAlignment = Alignment.CenterStart
     ) {
         if (booksForCovers.size <= 1) {
-            val imageModel = remember(shelf.topBook?.coverImagePath) {
-                shelf.topBook?.coverImagePath?.let { File(it) } ?: placeholder
+            val topBook = shelf.topBook
+            if (topBook != null) {
+                ThemedBookCover(
+                    item = topBook,
+                    contentDescription = stringResource(R.string.content_desc_shelf_cover, shelf.name),
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(width = coverWidth, height = coverHeight)
+                        .clip(MaterialTheme.shapes.small)
+                )
+            } else {
+                EmptyShelfCover(
+                    shelfName = shelf.name,
+                    modifier = Modifier
+                        .size(width = coverWidth, height = coverHeight)
+                        .clip(MaterialTheme.shapes.small)
+                )
             }
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(imageModel)
-                    .error(placeholder)
-                    .fallback(placeholder)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = stringResource(R.string.content_desc_shelf_cover, shelf.name),
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(width = coverWidth, height = coverHeight)
-                    .clip(MaterialTheme.shapes.small)
-            )
         } else {
             Box(
                 modifier = Modifier
@@ -1480,9 +1494,6 @@ private fun ShelfCover(shelf: Shelf) {
                     .height(coverHeight)
             ) {
                 booksForCovers.forEachIndexed { index, book ->
-                    val imageModel = remember(book.coverImagePath) {
-                        book.coverImagePath?.let { File(it) } ?: placeholder
-                    }
                     Surface(
                         shape = MaterialTheme.shapes.small,
                         shadowElevation = 4.dp,
@@ -1491,13 +1502,8 @@ private fun ShelfCover(shelf: Shelf) {
                             .align(Alignment.CenterEnd)
                             .offset(x = -horizontalOffset * index)
                     ) {
-                        AsyncImage(
-                            model = ImageRequest.Builder(context)
-                                .data(imageModel)
-                                .error(placeholder)
-                                .fallback(placeholder)
-                                .crossfade(true)
-                                .build(),
+                        ThemedBookCover(
+                            item = book,
                             contentDescription = null,
                             contentScale = ContentScale.Crop
                         )
@@ -1505,6 +1511,36 @@ private fun ShelfCover(shelf: Shelf) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun EmptyShelfCover(
+    shelfName: String,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .background(
+                androidx.compose.ui.graphics.Brush.linearGradient(
+                    colors = listOf(
+                        MaterialTheme.colorScheme.secondaryContainer,
+                        MaterialTheme.colorScheme.surfaceContainerHighest
+                    )
+                )
+            )
+            .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = shelfName.takeIf { it.isNotBlank() } ?: stringResource(R.string.tab_shelves),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(8.dp)
+        )
     }
 }
 
@@ -1596,15 +1632,6 @@ private fun LibraryListItem(
     onItemLongClick: () -> Unit,
     isDownloading: Boolean,
 ) {
-    val context = LocalContext.current
-    val placeholder = when (item.type) {
-        FileType.PDF -> R.drawable.pdf_placeholder
-        FileType.EPUB, FileType.MOBI, FileType.FB2, FileType.MD, FileType.TXT, FileType.HTML, FileType.CBZ, FileType.CBR, FileType.CB7, FileType.DOCX, FileType.ODT, FileType.FODT -> R.drawable.epub_placeholder
-    }
-    val imageModel = remember(item.coverImagePath) {
-        item.coverImagePath?.let { File(it) } ?: placeholder
-    }
-
     androidx.compose.material3.ElevatedCard(
         shape = MaterialTheme.shapes.large,
         colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
@@ -1641,13 +1668,8 @@ private fun LibraryListItem(
                     .clip(MaterialTheme.shapes.medium)
                     .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), MaterialTheme.shapes.medium)
             ) {
-                AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(imageModel)
-                        .error(placeholder)
-                        .fallback(placeholder)
-                        .crossfade(true)
-                        .build(),
+                ThemedBookCover(
+                    item = item,
                     contentDescription = item.displayName,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
@@ -2148,7 +2170,7 @@ private fun EditFolderFiltersDialog(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    FileType.entries.forEach { type ->
+                    ANDROID_SYNCABLE_FILE_TYPES.forEach { type ->
                         val isSelected = type in selectedTypes
                         FilterChip(
                             selected = isSelected,
@@ -2226,7 +2248,7 @@ fun LibraryFilterSheet(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FileType.entries.forEach { type ->
+                ANDROID_READABLE_FILE_TYPES.forEach { type ->
                     FilterChip(
                         selected = type in currentFilters.fileTypes,
                         onClick = {

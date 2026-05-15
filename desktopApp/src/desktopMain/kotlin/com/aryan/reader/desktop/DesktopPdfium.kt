@@ -1,5 +1,8 @@
 package com.aryan.reader.desktop
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.aryan.reader.shared.FileType
@@ -30,10 +33,17 @@ data class DesktopPdfDocument(
     val pageSizes: List<DesktopPdfPageSize>,
     val formatLabel: String = "PDF",
     val toc: List<PdfTocEntry> = emptyList(),
-    val embeddedAnnotations: List<SharedPdfEmbeddedAnnotation> = emptyList()
+    private val initialEmbeddedAnnotations: List<SharedPdfEmbeddedAnnotation> = emptyList()
 ) {
+    var embeddedAnnotations: List<SharedPdfEmbeddedAnnotation> by mutableStateOf(initialEmbeddedAnnotations)
+        private set
+
     private val textPageCache = LinkedHashMap<Int, DesktopPdfTextPageData>()
     private val searchIndex = SharedPdfSearchIndex(pageCount)
+
+    fun replaceEmbeddedAnnotations(annotations: List<SharedPdfEmbeddedAnnotation>) {
+        embeddedAnnotations = annotations
+    }
 
     fun textPageData(pageIndex: Int): DesktopPdfTextPageData {
         if (pageIndex !in 0 until pageCount) return DesktopPdfTextPageData()
@@ -93,7 +103,13 @@ data class DesktopPdfPageRender(
 
 data class DesktopPdfMetadata(
     val title: String? = null,
-    val author: String? = null
+    val author: String? = null,
+    val description: String? = null
+)
+
+internal val DesktopPdfZoomSpec = PdfZoomSpec(
+    max = 8.0f,
+    maxRenderPixels = 64_000_000
 )
 
 data class DesktopPdfTextChar(
@@ -133,10 +149,10 @@ object DesktopPdfium {
 
     private val textUrlRegex = Regex("""\b(?:https?://|www\.)[^\s<>"']+""", RegexOption.IGNORE_CASE)
     private val pdfiumDll: File by lazy(::resolvePdfiumDll)
-    private val zoomSpec = PdfZoomSpec()
+    private val zoomSpec = DesktopPdfZoomSpec
     private val api: PdfiumLibrary by lazy {
         require(pdfiumDll.exists()) {
-            "Missing Pdfium DLL. Expected pdfium-v8-win-x64 under third_party/pdfium/win-x64-v8/bin/pdfium.dll."
+            missingPdfiumLibraryMessage(pdfiumDll)
         }
         Native.load(pdfiumDll.absolutePath, PdfiumLibrary::class.java)
     }
@@ -205,7 +221,7 @@ object DesktopPdfium {
     }
 
     @Synchronized
-    fun load(file: File, password: String? = null): DesktopPdfDocument {
+    fun load(file: File, password: String? = null, loadEmbeddedAnnotations: Boolean = true): DesktopPdfDocument {
         initLibrary()
         val startedAt = System.currentTimeMillis()
         val loadedDocument = loadDocument(file, password)
@@ -217,12 +233,13 @@ object DesktopPdfium {
             val pageCount = api.FPDF_GetPageCount(document)
             logPdfiumOpen("metadata_loaded pageCount=$pageCount elapsedMs=${System.currentTimeMillis() - startedAt}")
             val pageSizes = (0 until pageCount).map { pageIndex ->
-                loadPage(document, pageIndex).usePointer { page ->
-                    DesktopPdfPageSize(
-                        width = api.FPDF_GetPageWidthF(page),
-                        height = api.FPDF_GetPageHeightF(page)
-                    )
-                }
+                pageSizeByIndex(document, pageIndex)
+                    ?: loadPage(document, pageIndex).usePointer { page ->
+                        DesktopPdfPageSize(
+                            width = api.FPDF_GetPageWidthF(page),
+                            height = api.FPDF_GetPageHeightF(page)
+                        )
+                    }
             }
             logPdfiumOpen("page_sizes_loaded pages=$pageCount elapsedMs=${System.currentTimeMillis() - startedAt}")
 
@@ -230,11 +247,17 @@ object DesktopPdfium {
             logPdfiumOpen("text_index_deferred pages=$pageCount elapsedMs=${System.currentTimeMillis() - startedAt}")
             val toc = extractTableOfContents(document, pageCount)
             logPdfiumOpen("toc_extracted entries=${toc.size} elapsedMs=${System.currentTimeMillis() - startedAt}")
-            val embeddedAnnotations = extractEmbeddedAnnotations(document, pageSizes)
-            logPdfiumOpen(
-                "embedded_annotations_extracted count=${embeddedAnnotations.size} " +
-                    "elapsedMs=${System.currentTimeMillis() - startedAt}"
-            )
+            val embeddedAnnotations = if (loadEmbeddedAnnotations) {
+                extractEmbeddedAnnotations(document, pageSizes).also { annotations ->
+                    logPdfiumOpen(
+                        "embedded_annotations_extracted count=${annotations.size} " +
+                            "elapsedMs=${System.currentTimeMillis() - startedAt}"
+                    )
+                }
+            } else {
+                logPdfiumOpen("embedded_annotations_deferred elapsedMs=${System.currentTimeMillis() - startedAt}")
+                emptyList()
+            }
 
             val result = DesktopPdfDocument(
                 path = file.absolutePath,
@@ -242,7 +265,7 @@ object DesktopPdfium {
                 pageCount = pageCount,
                 pageSizes = pageSizes,
                 toc = toc,
-                embeddedAnnotations = embeddedAnnotations
+                initialEmbeddedAnnotations = embeddedAnnotations
             )
             logPdfiumOpen("open_complete elapsedMs=${System.currentTimeMillis() - startedAt}")
             return result
@@ -294,6 +317,25 @@ object DesktopPdfium {
             pageSizes = comic.pageSizes,
             formatLabel = "OPDS"
         )
+    }
+
+    fun loadEmbeddedAnnotations(document: DesktopPdfDocument): List<SharedPdfEmbeddedAnnotation> {
+        if (synchronized(this) { openComicDocuments.containsKey(document.path) }) return emptyList()
+        val startedAt = System.currentTimeMillis()
+        val annotations = mutableListOf<SharedPdfEmbeddedAnnotation>()
+        for ((pageIndex, pageSize) in document.pageSizes.withIndex()) {
+            val pageAnnotations = synchronized(this) {
+                if (openComicDocuments.containsKey(document.path)) return annotations
+                val nativeDocument = openDocuments[document.path]?.pointer ?: return annotations
+                extractEmbeddedAnnotationsForPage(nativeDocument, pageIndex, pageSize)
+            }
+            annotations += pageAnnotations
+        }
+        logPdfiumOpen(
+            "embedded_annotations_loaded_async count=${annotations.size} " +
+                "elapsedMs=${System.currentTimeMillis() - startedAt}"
+        )
+        return annotations
     }
 
     @Synchronized
@@ -415,8 +457,10 @@ object DesktopPdfium {
         scale: Float,
         renderAnnotations: Boolean = true
     ): DesktopPdfPageRender {
+        val pageSize = document.pageSizes.getOrNull(pageIndex) ?: error("Invalid PDF page index $pageIndex.")
+        val safeScale = zoomSpec.safeRenderScale(pageSize.width, pageSize.height, scale)
         openComicDocuments[document.path]?.let { comic ->
-            val image = comic.renderPageBufferedImage(pageIndex, scale)
+            val image = comic.renderPageBufferedImage(pageIndex, safeScale)
             return DesktopPdfPageRender(
                 image = image.toComposeImageBitmap(),
                 width = image.width,
@@ -424,8 +468,6 @@ object DesktopPdfium {
             )
         }
         val nativeDocument = openDocuments[document.path]?.pointer ?: error("PDF document is not open.")
-        val pageSize = document.pageSizes.getOrNull(pageIndex) ?: error("Invalid PDF page index $pageIndex.")
-        val safeScale = zoomSpec.safeRenderScale(pageSize.width, pageSize.height, scale)
         val width = (pageSize.width * safeScale).roundToInt().coerceAtLeast(1)
         val height = (pageSize.height * safeScale).roundToInt().coerceAtLeast(1)
         val stride = width * 4
@@ -459,12 +501,12 @@ object DesktopPdfium {
         scale: Float,
         renderAnnotations: Boolean = true
     ): BufferedImage {
-        openComicDocuments[document.path]?.let { comic ->
-            return comic.renderPageBufferedImage(pageIndex, scale)
-        }
-        val nativeDocument = openDocuments[document.path]?.pointer ?: error("PDF document is not open.")
         val pageSize = document.pageSizes.getOrNull(pageIndex) ?: error("Invalid PDF page index $pageIndex.")
         val safeScale = zoomSpec.safeRenderScale(pageSize.width, pageSize.height, scale)
+        openComicDocuments[document.path]?.let { comic ->
+            return comic.renderPageBufferedImage(pageIndex, safeScale)
+        }
+        val nativeDocument = openDocuments[document.path]?.pointer ?: error("PDF document is not open.")
         val width = (pageSize.width * safeScale).roundToInt().coerceAtLeast(1)
         val height = (pageSize.height * safeScale).roundToInt().coerceAtLeast(1)
         val stride = width * 4
@@ -836,7 +878,8 @@ object DesktopPdfium {
     private fun extractDocumentMetadata(document: Pointer): DesktopPdfMetadata {
         return DesktopPdfMetadata(
             title = documentMetaText(document, "Title").cleanPdfMetadata(),
-            author = documentMetaText(document, "Author").cleanPdfMetadata()
+            author = documentMetaText(document, "Author").cleanPdfMetadata(),
+            description = documentMetaText(document, "Subject").cleanPdfMetadata()
         )
     }
 
@@ -900,16 +943,24 @@ object DesktopPdfium {
         pageSizes: List<DesktopPdfPageSize>
     ): List<SharedPdfEmbeddedAnnotation> {
         return pageSizes.flatMapIndexed { pageIndex, pageSize ->
-            runCatching {
-                loadPage(document, pageIndex).usePointer { page ->
-                    val count = api.FPDFPage_GetAnnotCount(page).coerceAtLeast(0)
-                    val rawAnnotations = (0 until count).mapNotNull { index ->
-                        extractEmbeddedAnnotation(page, pageIndex, index, pageSize)
-                    }
-                    SharedPdfEmbeddedAnnotationThreads.group(rawAnnotations)
-                }
-            }.getOrDefault(emptyList())
+            extractEmbeddedAnnotationsForPage(document, pageIndex, pageSize)
         }
+    }
+
+    private fun extractEmbeddedAnnotationsForPage(
+        document: Pointer,
+        pageIndex: Int,
+        pageSize: DesktopPdfPageSize
+    ): List<SharedPdfEmbeddedAnnotation> {
+        return runCatching {
+            loadPage(document, pageIndex).usePointer { page ->
+                val count = api.FPDFPage_GetAnnotCount(page).coerceAtLeast(0)
+                val rawAnnotations = (0 until count).mapNotNull { index ->
+                    extractEmbeddedAnnotation(page, pageIndex, index, pageSize)
+                }
+                SharedPdfEmbeddedAnnotationThreads.group(rawAnnotations)
+            }
+        }.getOrDefault(emptyList())
     }
 
     private fun extractEmbeddedAnnotation(
@@ -996,6 +1047,19 @@ object DesktopPdfium {
         return PointerResource(page, api::FPDF_ClosePage)
     }
 
+    private fun pageSizeByIndex(document: Pointer, pageIndex: Int): DesktopPdfPageSize? {
+        val width = DoubleArray(1)
+        val height = DoubleArray(1)
+        val loaded = runCatching {
+            api.FPDF_GetPageSizeByIndex(document, pageIndex, width, height)
+        }.getOrDefault(0)
+        return if (loaded != 0 && width[0] > 0.0 && height[0] > 0.0) {
+            DesktopPdfPageSize(width[0].toFloat(), height[0].toFloat())
+        } else {
+            null
+        }
+    }
+
     private fun initLibrary() {
         if (!initialized) {
             api.FPDF_InitLibrary()
@@ -1004,14 +1068,21 @@ object DesktopPdfium {
     }
 
     private fun resolvePdfiumDll(): File {
-        val overridePath = System.getProperty("reader.pdfium.dll")
+        val overridePath = System.getProperty("reader.pdfium.path")
+            ?: System.getenv("READER_PDFIUM_PATH")
+            ?: System.getProperty("reader.pdfium.dll")
             ?: System.getenv("READER_PDFIUM_DLL")
         if (!overridePath.isNullOrBlank()) {
             return File(overridePath).absoluteFile
         }
 
-        val relativePath = listOf("third_party", "pdfium", "win-x64-v8", "bin", "pdfium.dll")
-            .joinToString(File.separator)
+        val platform = currentDesktopPlatform()
+        val relativePath = desktopPdfiumRelativePath(platform)
+        val resourceDir = System.getProperty(ComposeApplicationResourcesDirProperty)
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+        resourceDir?.resolve(relativePath)?.absoluteFile?.takeIf { it.exists() }?.let { return it }
+
         val roots = generateSequence(File(System.getProperty("user.dir")).absoluteFile) { it.parentFile }
             .take(6)
             .toList()
@@ -1020,6 +1091,22 @@ object DesktopPdfium {
             .map { File(it, relativePath).absoluteFile }
             .firstOrNull { it.exists() }
             ?: File(File(System.getProperty("user.dir")).absoluteFile, relativePath).absoluteFile
+    }
+
+    private fun desktopPdfiumRelativePath(platform: DesktopPlatform): String {
+        return listOf(
+            "third_party",
+            "pdfium",
+            platform.pdfiumDirectoryName,
+            platform.pdfiumLibraryDirectoryName,
+            platform.pdfiumLibraryFileName
+        ).joinToString(File.separator)
+    }
+
+    private fun missingPdfiumLibraryMessage(expectedFile: File): String {
+        val platform = currentDesktopPlatform()
+        return "Missing Pdfium library for ${platform.os.name.lowercase()}-${platform.architecture.resourceName}. " +
+            "Expected ${expectedFile.absolutePath}. You can also set reader.pdfium.path or READER_PDFIUM_PATH."
     }
 
     private fun Memory.toBufferedImage(width: Int, height: Int, stride: Int): BufferedImage {
@@ -1056,11 +1143,11 @@ object DesktopPdfium {
     }
 
     private fun logPdfiumOpen(message: String) {
-        println("DesktopPdfiumOpen $message")
+        logDesktopDiagnostic("DesktopPdfiumOpen") { message }
     }
 
     private fun logPdfiumLink(message: String) {
-        println("DesktopPdfiumLink $message")
+        logDesktopDiagnostic("DesktopPdfiumLink") { message }
     }
 
     private fun Float.formatLogFloat(): String {
@@ -1203,6 +1290,7 @@ object DesktopPdfium {
         fun FPDF_GetLastError(): Int
         fun FPDF_GetMetaText(document: Pointer, tag: String, buffer: Pointer?, buflen: Int): Int
         fun FPDF_GetPageCount(document: Pointer): Int
+        fun FPDF_GetPageSizeByIndex(document: Pointer, pageIndex: Int, width: DoubleArray, height: DoubleArray): Int
         fun FPDFBookmark_GetFirstChild(document: Pointer, bookmark: Pointer?): Pointer?
         fun FPDFBookmark_GetNextSibling(document: Pointer, bookmark: Pointer): Pointer?
         fun FPDFBookmark_GetTitle(bookmark: Pointer, buffer: Pointer?, buflen: Int): Int

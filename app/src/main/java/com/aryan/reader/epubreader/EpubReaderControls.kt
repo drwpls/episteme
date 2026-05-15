@@ -72,6 +72,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowUpward
@@ -88,6 +89,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Visibility
@@ -104,6 +106,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -166,8 +169,9 @@ enum class ReaderTool(val title: String, val category: String) {
     PAGE_TURN_ANIM("Realistic Page Turns", "Overflow Menu"),
     KEEP_SCREEN_ON("Keep Screen On", "Overflow Menu"),
     VISUAL_OPTIONS("Visual Options", "Overflow Menu"),
+    SCREEN_ORIENTATION("Screen Orientation", "Top Bar"),
     AUTO_SCROLL("Auto Scroll", "Overflow Menu"),
-    TTS_SETTINGS("TTS Voice Settings", "Overflow Menu"),
+    TTS_SETTINGS("TTS Settings", "Overflow Menu"),
     TTS_REPLACEMENTS("TTS Word Replacements", "Overflow Menu")
 }
 
@@ -258,7 +262,8 @@ private val epubToolbarTools = setOf(
     ReaderTool.FORMAT,
     ReaderTool.SEARCH,
     ReaderTool.AI_FEATURES,
-    ReaderTool.TTS_CONTROLS
+    ReaderTool.TTS_CONTROLS,
+    ReaderTool.SCREEN_ORIENTATION
 )
 
 @Composable
@@ -272,6 +277,7 @@ fun EpubReaderTopBar(
     tapToNavigateEnabled: Boolean,
     volumeScrollEnabled: Boolean,
     isPageTurnAnimationEnabled: Boolean,
+    isRightToLeftPagination: Boolean,
     onNavigateBack: () -> Unit,
     isKeepScreenOn: Boolean,
     onToggleKeepScreenOn: (Boolean) -> Unit,
@@ -281,12 +287,14 @@ fun EpubReaderTopBar(
     onToggleTapToNavigate: (Boolean) -> Unit,
     onToggleVolumeScroll: (Boolean) -> Unit,
     onTogglePageTurnAnimation: (Boolean) -> Unit,
+    onSetRightToLeftPagination: (Boolean) -> Unit,
     onStartAutoScroll: () -> Unit,
     onOpenTtsSettings: () -> Unit,
     onOpenTtsReplacements: () -> Unit,
     onOpenDictionarySettings: () -> Unit,
     onOpenThemeSettings: () -> Unit,
     onOpenVisualOptions: () -> Unit,
+    onOpenScreenOrientation: () -> Unit,
     onOpenSlider: () -> Unit,
     onOpenDrawer: () -> Unit,
     onToggleFormat: () -> Unit,
@@ -414,17 +422,32 @@ fun EpubReaderTopBar(
                                         tint = if (isTtsActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                                     )
                                 }
+                                ReaderTool.SCREEN_ORIENTATION -> TooltipIconButton(
+                                    text = stringResource(R.string.menu_screen_orientation),
+                                    description = stringResource(R.string.visual_options_screen_orientation_desc),
+                                    onClick = onOpenScreenOrientation
+                                ) {
+                                    Icon(
+                                        Icons.Default.ScreenRotation,
+                                        contentDescription = stringResource(R.string.menu_screen_orientation),
+                                        tint = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
                                 else -> Unit
                             }
                         }
                     Box {
                         var showMoreMenu by remember { mutableStateOf(false) }
                         var showHiddenToolsExpanded by remember { mutableStateOf(false) }
+                        var showReadingModeExpanded by remember { mutableStateOf(false) }
+                        var showTtsSettingsExpanded by remember { mutableStateOf(false) }
                         TooltipIconButton(
                             text = stringResource(R.string.tooltip_more_options),
                             description = stringResource(R.string.tooltip_more_options_desc),
                             onClick = {
                                 showHiddenToolsExpanded = false
+                                showReadingModeExpanded = false
+                                showTtsSettingsExpanded = false
                                 showMoreMenu = true
                             }
                         ) {
@@ -435,6 +458,8 @@ fun EpubReaderTopBar(
                             expanded = showMoreMenu,
                             onDismissRequest = {
                                 showHiddenToolsExpanded = false
+                                showReadingModeExpanded = false
+                                showTtsSettingsExpanded = false
                                 showMoreMenu = false
                             }
                         ) {
@@ -480,7 +505,8 @@ fun EpubReaderTopBar(
                                             onToggleFormat = onToggleFormat,
                                             onToggleSearch = onToggleSearch,
                                             onOpenAiHub = onOpenAiHub,
-                                            onToggleTts = onToggleTts
+                                            onToggleTts = onToggleTts,
+                                            onOpenScreenOrientation = onOpenScreenOrientation
                                         )
                                     }
                                 }
@@ -528,31 +554,63 @@ fun EpubReaderTopBar(
 
                             if (!hiddenTools.contains(ReaderTool.READING_MODE.name)) {
                                 DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.menu_reading_mode_vertical)) },
-                                    enabled = !isTtsActive,
-                                    onClick = {
-                                        showMoreMenu = false
-                                        onChangeRenderMode(RenderMode.VERTICAL_SCROLL)
-                                    },
+                                    text = { Text(stringResource(R.string.menu_change_reading_mode)) },
+                                    onClick = { showReadingModeExpanded = !showReadingModeExpanded },
                                     trailingIcon = {
-                                        if (currentRenderMode == RenderMode.VERTICAL_SCROLL) Icon(
-                                            Icons.Default.Check,
-                                            contentDescription = stringResource(R.string.content_desc_selected)
+                                        Icon(
+                                            Icons.Default.ArrowDropDown,
+                                            contentDescription = null,
+                                            modifier = Modifier.rotate(if (showReadingModeExpanded) 180f else 0f)
                                         )
-                                    })
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.menu_reading_mode_paginated)) },
-                                    enabled = !isTtsActive,
-                                    onClick = {
-                                        showMoreMenu = false
-                                        onChangeRenderMode(RenderMode.PAGINATED)
-                                    },
-                                    trailingIcon = {
-                                        if (currentRenderMode == RenderMode.PAGINATED) Icon(
-                                            Icons.Default.Check,
-                                            contentDescription = stringResource(R.string.content_desc_selected)
-                                        )
-                                    })
+                                    }
+                                )
+                                if (showReadingModeExpanded) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.menu_reading_mode_vertical)) },
+                                        enabled = !isTtsActive,
+                                        onClick = {
+                                            showMoreMenu = false
+                                            onChangeRenderMode(RenderMode.VERTICAL_SCROLL)
+                                        },
+                                        trailingIcon = {
+                                            if (currentRenderMode == RenderMode.VERTICAL_SCROLL) Icon(
+                                                Icons.Default.Check,
+                                                contentDescription = stringResource(R.string.content_desc_selected)
+                                            )
+                                        })
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.menu_reading_mode_paginated)) },
+                                        enabled = !isTtsActive,
+                                        onClick = {
+                                            onSetRightToLeftPagination(false)
+                                            showMoreMenu = false
+                                            onChangeRenderMode(RenderMode.PAGINATED)
+                                        },
+                                        trailingIcon = {
+                                            if (currentRenderMode == RenderMode.PAGINATED && !isRightToLeftPagination) {
+                                                Icon(
+                                                    Icons.Default.Check,
+                                                    contentDescription = stringResource(R.string.content_desc_selected)
+                                                )
+                                            }
+                                        })
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.menu_right_to_left_pagination)) },
+                                        enabled = !isTtsActive,
+                                        onClick = {
+                                            onSetRightToLeftPagination(true)
+                                            showMoreMenu = false
+                                            onChangeRenderMode(RenderMode.PAGINATED)
+                                        },
+                                        trailingIcon = {
+                                            if (currentRenderMode == RenderMode.PAGINATED && isRightToLeftPagination) {
+                                                Icon(
+                                                    Icons.Default.Check,
+                                                    contentDescription = stringResource(R.string.content_desc_selected)
+                                                )
+                                            }
+                                        })
+                                }
                                 HorizontalDivider()
                             }
                             if (!hiddenTools.contains(ReaderTool.BOOKMARK.name)) {
@@ -664,42 +722,148 @@ fun EpubReaderTopBar(
                                     })
                                 HorizontalDivider()
                             }
-                            if (!hiddenTools.contains(ReaderTool.TTS_SETTINGS.name)) {
+                            val showTtsVoiceSettings = !hiddenTools.contains(ReaderTool.TTS_SETTINGS.name)
+                            val showTtsReplacements = !hiddenTools.contains(ReaderTool.TTS_REPLACEMENTS.name)
+                            if (showTtsVoiceSettings || showTtsReplacements) {
                                 DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.menu_tts_voice_settings)) },
-                                    enabled = !isTtsActive,
-                                    onClick = {
-                                        showMoreMenu = false
-                                        onOpenTtsSettings()
-                                    },
+                                    text = { Text(stringResource(R.string.menu_tts_settings)) },
+                                    onClick = { showTtsSettingsExpanded = !showTtsSettingsExpanded },
                                     leadingIcon = {
                                         Icon(
                                             Icons.Default.GraphicEq,
                                             contentDescription = null,
                                             modifier = Modifier.size(20.dp)
                                         )
-                                    }
-                                )
-                                HorizontalDivider()
-                            }
-                            if (!hiddenTools.contains(ReaderTool.TTS_REPLACEMENTS.name)) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.menu_tts_word_replacements)) },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        onOpenTtsReplacements()
                                     },
-                                    leadingIcon = {
+                                    trailingIcon = {
                                         Icon(
-                                            Icons.Default.GraphicEq,
+                                            Icons.Default.ArrowDropDown,
                                             contentDescription = null,
-                                            modifier = Modifier.size(20.dp)
+                                            modifier = Modifier.rotate(if (showTtsSettingsExpanded) 180f else 0f)
                                         )
                                     }
                                 )
+                                if (showTtsSettingsExpanded) {
+                                    if (showTtsVoiceSettings) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.menu_tts_voice_settings)) },
+                                            enabled = !isTtsActive,
+                                            onClick = {
+                                                showMoreMenu = false
+                                                onOpenTtsSettings()
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.GraphicEq,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        )
+                                    }
+                                    if (showTtsReplacements) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.menu_tts_word_replacements)) },
+                                            onClick = {
+                                                showMoreMenu = false
+                                                onOpenTtsReplacements()
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.GraphicEq,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EpubJumpHistoryBar(
+    modifier: Modifier = Modifier,
+    showStandardBars: Boolean,
+    searchStateActive: Boolean,
+    backLabel: String?,
+    forwardLabel: String?,
+    onBack: () -> Unit,
+    onForward: () -> Unit,
+    onClear: () -> Unit
+) {
+    AnimatedVisibility(
+        visible = showStandardBars && !searchStateActive && (backLabel != null || forwardLabel != null),
+        enter = slideInVertically(animationSpec = tween(200)) { fullHeight -> fullHeight } + fadeIn(animationSpec = tween(200)),
+        exit = slideOutVertically(animationSpec = tween(200)) { fullHeight -> fullHeight } + fadeOut(animationSpec = tween(200)),
+        modifier = modifier
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            tonalElevation = 3.dp
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(40.dp)
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                TextButton(
+                    onClick = onBack,
+                    enabled = backLabel != null,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = stringResource(R.string.content_desc_jump_back),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = backLabel.orEmpty(),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                TextButton(
+                    onClick = onClear,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = stringResource(R.string.action_clear),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(stringResource(R.string.action_clear), maxLines = 1)
+                }
+
+                TextButton(
+                    onClick = onForward,
+                    enabled = forwardLabel != null,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = forwardLabel.orEmpty(),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = stringResource(R.string.content_desc_jump_forward),
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
         }
@@ -723,6 +887,7 @@ fun EpubReaderBottomBar(
     onOpenDictionarySettings: () -> Unit,
     onOpenThemeSettings: () -> Unit,
     onToggleTts: () -> Unit,
+    onOpenScreenOrientation: () -> Unit,
     hiddenTools: Set<String>,
     toolOrder: List<ReaderTool>,
     bottomTools: Set<String>,
@@ -833,6 +998,16 @@ fun EpubReaderBottomBar(
                                         R.string.content_desc_start_tts
                                     ),
                                     tint = if (isTtsSessionActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            ReaderTool.SCREEN_ORIENTATION -> TooltipIconButton(
+                                text = stringResource(R.string.menu_screen_orientation),
+                                description = stringResource(R.string.visual_options_screen_orientation_desc),
+                                onClick = onOpenScreenOrientation
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ScreenRotation,
+                                    contentDescription = stringResource(R.string.menu_screen_orientation)
                                 )
                             }
                             else -> Unit
@@ -1849,6 +2024,7 @@ private fun ToolPreviewIcon(tool: ReaderTool) {
         ReaderTool.SEARCH -> Icon(Icons.Default.Search, contentDescription = tool.title, modifier = Modifier.size(20.dp))
         ReaderTool.AI_FEATURES -> Icon(painterResource(id = R.drawable.ai), contentDescription = tool.title, modifier = Modifier.size(20.dp))
         ReaderTool.TTS_CONTROLS -> Icon(painterResource(id = R.drawable.text_to_speech), contentDescription = tool.title, modifier = Modifier.size(20.dp))
+        ReaderTool.SCREEN_ORIENTATION -> Icon(Icons.Default.ScreenRotation, contentDescription = tool.title, modifier = Modifier.size(20.dp))
         else -> Icon(Icons.Default.MoreVert, contentDescription = tool.title, modifier = Modifier.size(20.dp))
     }
 }
@@ -1866,7 +2042,8 @@ private fun HiddenEpubToolMenuItem(
     onToggleFormat: () -> Unit,
     onToggleSearch: () -> Unit,
     onOpenAiHub: () -> Unit,
-    onToggleTts: () -> Unit
+    onToggleTts: () -> Unit,
+    onOpenScreenOrientation: () -> Unit
 ) {
     val enabled = when (tool) {
         ReaderTool.SLIDER -> currentRenderMode != RenderMode.VERTICAL_SCROLL
@@ -1886,6 +2063,7 @@ private fun HiddenEpubToolMenuItem(
                 ReaderTool.SEARCH -> onToggleSearch()
                 ReaderTool.AI_FEATURES -> onOpenAiHub()
                 ReaderTool.TTS_CONTROLS -> onToggleTts()
+                ReaderTool.SCREEN_ORIENTATION -> onOpenScreenOrientation()
                 else -> Unit
             }
         },

@@ -80,14 +80,19 @@ class SharedLibraryProjectorTest {
             )
         )
 
-        assertEquals(listOf("C:/books/notes.md", "mystery.bin", "C:/books/existing.pdf"), result.books.ids())
+        assertEquals(listOf("C:/books/notes.md", "C:/books/existing.pdf"), result.books.ids())
         assertEquals(FileType.MD, result.books[0].type)
         assertEquals("C:/books", result.books[0].sourceFolder)
         assertFalse(result.books[0].isRecent)
-        assertEquals(FileType.UNKNOWN, result.books[1].type)
-        assertFalse(result.books[1].isRecent)
         assertTrue(projector.home(result).recentBooks.isEmpty())
-        assertEquals("Imported 2 file(s). Reader support comes later.", result.message)
+        assertEquals("Imported 1 file(s). Reader support comes later.", result.message)
+
+        val unsupportedOnly = projector.withImportedFiles(
+            state,
+            listOf(ImportedFile(name = "mystery.bin", path = null, size = 3L))
+        )
+        assertEquals(state.books.ids(), unsupportedOnly.books.ids())
+        assertEquals("No supported files were imported.", unsupportedOnly.message)
     }
 
     @Test
@@ -200,6 +205,34 @@ class SharedLibraryProjectorTest {
     }
 
     @Test
+    fun `SharedLibraryStateProjector auto creates synced folder fallback shelves from source folders`() {
+        val folderBook = book(
+            id = "folder_book",
+            sourceFolder = "C:/Library",
+            path = "C:/Library/Nested/Book.epub"
+        )
+
+        val result = SharedLibraryStateProjector(
+            SharedFolderPathResolver { item ->
+                if (item.id == "folder_book") listOf("Nested") else emptyList()
+            }
+        ).project(
+            SharedLibraryProjectionInput(
+                state = SharedReaderScreenState(),
+                booksFromStore = listOf(folderBook),
+                shelfRecords = emptyList(),
+                shelfRefs = emptyList(),
+                tags = emptyList()
+            )
+        )
+
+        assertEquals(listOf("C:/Library"), result.syncedFolders.map { it.uriString })
+        assertEquals("Library", result.syncedFolders.single().name)
+        assertEquals(listOf("folder_book"), result.shelves.first { it.id == "folder_C:/Library" }.books.ids())
+        assertEquals(listOf("folder_book"), result.shelves.first { it.id == "folder_C:/Library::Nested" }.directBooks.ids())
+    }
+
+    @Test
     fun `SharedLibraryStateProjector builds smart shelves from shared rules`() {
         val smartRules = SmartCollectionEngine.toJson(
             SmartCollectionDefinition(
@@ -244,6 +277,10 @@ class SharedLibraryProjectorTest {
             listOf(ImportedBookFile(name = "new.pdf", uriString = "content://new", localPath = null, size = 2L)),
             now = 20L
         )
+        val unsupportedOnly = imported.withImportedFiles(
+            listOf(ImportedBookFile(name = "archive.zip", uriString = null, localPath = "/books/archive.zip", size = 2L)),
+            now = 30L
+        )
 
         assertEquals(listOf("content://new", "/books/existing.epub"), imported.rawLibraryBooks.ids())
         assertEquals(FileType.PDF, imported.rawLibraryBooks.first().type)
@@ -262,6 +299,8 @@ class SharedLibraryProjectorTest {
         assertTrue(projected.recentBooks.isEmpty())
         assertEquals("Imported 1 file(s).", imported.bannerMessage?.message)
         assertEquals("Those files are already in the library.", duplicateOnly.bannerMessage?.message)
+        assertEquals(imported.rawLibraryBooks.ids(), unsupportedOnly.rawLibraryBooks.ids())
+        assertEquals("No supported files were imported.", unsupportedOnly.bannerMessage?.message)
     }
 
     @Test

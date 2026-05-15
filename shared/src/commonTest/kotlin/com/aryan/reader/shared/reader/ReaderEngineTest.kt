@@ -1,5 +1,6 @@
 package com.aryan.reader.shared.reader
 
+import com.aryan.reader.shared.ReaderLocator
 import com.aryan.reader.paginatedreader.CssStyle
 import com.aryan.reader.paginatedreader.SemanticParagraph
 import kotlin.test.Test
@@ -38,6 +39,111 @@ class ReaderEngineTest {
     }
 
     @Test
+    fun `visual settings update does not repaginate or move current page`() {
+        val engine = ReaderEngine()
+        val session = engine.goToPage(engine.createSession(longBook()), 1)
+        val oldPages = session.reader.pages
+        val oldPageIndex = session.reader.currentPageIndex
+
+        val updated = engine.updateSettings(
+            session,
+            session.reader.settings.copy(
+                darkMode = true,
+                themeId = "night",
+                backgroundColorArgb = 0xFF101010L,
+                textColorArgb = 0xFFEFEFEFL,
+                textureId = "paper",
+                textureAlpha = 0.25f
+            )
+        )
+
+        assertSame(oldPages, updated.reader.pages)
+        assertEquals(oldPageIndex, updated.reader.currentPageIndex)
+        assertEquals("night", updated.reader.settings.themeId)
+    }
+
+    @Test
+    fun `createSession restores precise locator ahead of fallback page index`() {
+        val engine = ReaderEngine()
+        val book = longBook()
+        val base = engine.createSession(book)
+        val targetPage = base.reader.pages.getOrNull(2) ?: error("Expected multiple pages")
+        val locator = ReaderLocator(
+            chapterIndex = targetPage.chapterIndex,
+            pageIndex = targetPage.pageIndex,
+            startOffset = targetPage.startOffset + 12,
+            endOffset = targetPage.startOffset + 12,
+            cfi = "desktop:${targetPage.chapterIndex}:${targetPage.startOffset + 12}:${targetPage.startOffset + 12}"
+        )
+
+        val restored = engine.createSession(
+            book = book,
+            initialPageIndex = 0,
+            initialLocator = locator
+        )
+
+        assertEquals(targetPage.pageIndex, restored.navigationLocator?.pageIndex)
+        assertEquals(targetPage.pageIndex, restored.reader.currentPageIndex)
+        assertEquals(locator.startOffset, restored.navigationLocator?.startOffset)
+    }
+
+    @Test
+    fun `layout settings update keeps precise visible locator across reading modes`() {
+        val engine = ReaderEngine()
+        val session = engine.createSession(longBook())
+        val targetPage = session.reader.pages.getOrNull(1) ?: error("Expected multiple pages")
+        val visibleLocator = ReaderLocator(
+            chapterIndex = targetPage.chapterIndex,
+            pageIndex = targetPage.pageIndex,
+            startOffset = targetPage.startOffset + 40,
+            endOffset = targetPage.startOffset + 40,
+            textQuote = "visible text",
+            cfi = "desktop:${targetPage.chapterIndex}:${targetPage.startOffset + 40}:${targetPage.startOffset + 40}"
+        )
+        val synced = engine.syncVisiblePage(session, targetPage.pageIndex, visibleLocator)
+
+        val updated = engine.updateSettings(
+            synced,
+            synced.reader.settings.copy(
+                readingMode = ReaderReadingMode.VERTICAL,
+                pageSpreadMode = ReaderPageSpreadMode.TWO_PAGE,
+                fontSize = synced.reader.settings.fontSize + 4
+            )
+        )
+
+        val page = updated.reader.currentPage ?: error("Expected current page")
+        assertEquals(visibleLocator.startOffset, updated.navigationLocator?.startOffset)
+        assertTrue(visibleLocator.startOffset!! in page.startOffset..page.endOffset)
+    }
+
+    @Test
+    fun `two page spread keeps right page locator while normalizing visible spread start`() {
+        val engine = ReaderEngine()
+        val session = engine.createSession(longBook())
+        val targetPage = session.reader.pages.getOrNull(3) ?: error("Expected multiple pages")
+        val locator = ReaderLocator(
+            chapterIndex = targetPage.chapterIndex,
+            pageIndex = targetPage.pageIndex,
+            startOffset = targetPage.startOffset + 20,
+            endOffset = targetPage.startOffset + 20,
+            cfi = "desktop:${targetPage.chapterIndex}:${targetPage.startOffset + 20}:${targetPage.startOffset + 20}"
+        )
+        val synced = engine.syncVisiblePage(session, targetPage.pageIndex, locator)
+
+        val updated = engine.updateSettings(
+            synced,
+            synced.reader.settings.copy(
+                readingMode = ReaderReadingMode.PAGINATED,
+                pageSpreadMode = ReaderPageSpreadMode.TWO_PAGE
+            )
+        )
+
+        assertEquals(targetPage.pageIndex - 1, updated.reader.currentPageIndex)
+        assertEquals(targetPage.pageIndex, updated.navigationLocator?.pageIndex)
+        assertEquals(locator.startOffset, updated.navigationLocator?.startOffset)
+    }
+
+    @Test
     fun `search returns every match on a page`() {
         val engine = ReaderEngine()
         val session = engine.createSession(
@@ -60,6 +166,7 @@ class ReaderEngineTest {
         assertEquals(3, searched.searchResults.size)
         assertEquals(listOf(0, 11, 23), searched.searchResults.map { it.matchIndex })
         assertTrue(searched.searchResults.all { it.pageIndex == 0 })
+        assertEquals(-1, searched.activeSearchResultIndex)
 
         val secondMatch = engine.goToSearchResult(searched, 1)
 
@@ -172,6 +279,116 @@ class ReaderEngineTest {
         assertEquals(7, target.locator.startOffset)
     }
 
+    @Test
+    fun `jump navigation records locator history and can step back and forward`() {
+        val engine = ReaderEngine()
+        val session = engine.createSession(multiChapterBook())
+
+        val second = engine.jumpToChapter(session, 1)
+        val third = engine.jumpToChapter(second, 2)
+        val back = engine.jumpBack(third)
+        val forward = engine.jumpForward(back)
+
+        assertEquals(1, third.jumpHistory.backLocator?.chapterIndex)
+        assertEquals(1, back.reader.currentPage?.chapterIndex)
+        assertEquals(0, back.jumpHistory.backLocator?.chapterIndex)
+        assertEquals(2, back.jumpHistory.forwardLocator?.chapterIndex)
+        assertEquals(2, forward.reader.currentPage?.chapterIndex)
+        assertTrue(engine.clearJumpHistory(forward).jumpHistory.locators.isEmpty())
+    }
+
+    @Test
+    fun `paginated mode does not record or use jump history`() {
+        val engine = ReaderEngine()
+        val session = engine.createSession(
+            book = multiChapterBook(),
+            settings = ReaderSettings(readingMode = ReaderReadingMode.PAGINATED)
+        )
+
+        val jumped = engine.jumpToChapter(session, 1)
+        val verticalWithHistory = engine.jumpToChapter(engine.createSession(multiChapterBook()), 1)
+        val switchedToPaginated = engine.updateSettings(
+            verticalWithHistory,
+            verticalWithHistory.reader.settings.copy(readingMode = ReaderReadingMode.PAGINATED)
+        )
+        val withLegacyHistory = jumped.copy(
+            jumpHistory = ReaderJumpHistory()
+                .record(
+                    currentLocator = ReaderLocator(chapterIndex = 0, cfi = "desktop:0:0:0"),
+                    targetLocator = ReaderLocator(chapterIndex = 1, cfi = "desktop:1:0:0"),
+                    chapterCount = 3
+                )
+        )
+        val back = engine.jumpBack(withLegacyHistory)
+
+        assertTrue(jumped.jumpHistory.locators.isEmpty())
+        assertTrue(switchedToPaginated.jumpHistory.locators.isEmpty())
+        assertEquals(jumped.reader.currentPageIndex, back.reader.currentPageIndex)
+        assertTrue(back.jumpHistory.locators.isEmpty())
+    }
+
+    @Test
+    fun `replacePages uses captured reflow anchor when no newer navigation happened`() {
+        val engine = ReaderEngine()
+        val book = manualRangeBook()
+        val oldPages = listOf(
+            ReaderPage(0, 0, "One", "first", 0, 100),
+            ReaderPage(1, 0, "One", "second", 100, 200)
+        )
+        val newPages = listOf(
+            ReaderPage(0, 0, "One", "first expanded", 0, 140),
+            ReaderPage(1, 0, "One", "second shifted", 140, 260)
+        )
+        val session = engine.createSession(book).copy(
+            reader = PaginatedReaderState(book, oldPages, currentPageIndex = 1),
+            navigationLocator = ReaderLocator(chapterIndex = 0, pageIndex = 0, startOffset = 20, endOffset = 20),
+            navigationRequestId = 4L
+        )
+        val reflowAnchor = ReaderLocator(chapterIndex = 0, pageIndex = 1, startOffset = 160, endOffset = 160)
+
+        val replaced = engine.replacePages(
+            state = session,
+            pages = newPages,
+            reflowAnchor = reflowAnchor,
+            navigationRequestIdAtReflowStart = 4L
+        )
+
+        assertEquals(1, replaced.reader.currentPageIndex)
+        assertEquals(1, replaced.navigationLocator?.pageIndex)
+        assertEquals(160, replaced.navigationLocator?.startOffset)
+    }
+
+    @Test
+    fun `replacePages lets newer explicit navigation override reflow anchor`() {
+        val engine = ReaderEngine()
+        val book = manualRangeBook()
+        val oldPages = listOf(
+            ReaderPage(0, 0, "One", "first", 0, 100),
+            ReaderPage(1, 0, "One", "second", 100, 200)
+        )
+        val newPages = listOf(
+            ReaderPage(0, 0, "One", "first expanded", 0, 140),
+            ReaderPage(1, 0, "One", "second shifted", 140, 260)
+        )
+        val session = engine.createSession(book).copy(
+            reader = PaginatedReaderState(book, oldPages, currentPageIndex = 0),
+            navigationLocator = ReaderLocator(chapterIndex = 0, pageIndex = 0, startOffset = 20, endOffset = 20),
+            navigationRequestId = 5L
+        )
+        val staleReflowAnchor = ReaderLocator(chapterIndex = 0, pageIndex = 1, startOffset = 160, endOffset = 160)
+
+        val replaced = engine.replacePages(
+            state = session,
+            pages = newPages,
+            reflowAnchor = staleReflowAnchor,
+            navigationRequestIdAtReflowStart = 4L
+        )
+
+        assertEquals(0, replaced.reader.currentPageIndex)
+        assertEquals(0, replaced.navigationLocator?.pageIndex)
+        assertEquals(20, replaced.navigationLocator?.startOffset)
+    }
+
     private fun longBook(): SharedEpubBook {
         return SharedEpubBook(
             id = "long",
@@ -183,6 +400,34 @@ class ReaderEngineTest {
                     title = "One",
                     plainText = List(280) { "This paragraph gives the paginator enough text to create several pages." }
                         .joinToString("\n\n")
+                )
+            )
+        )
+    }
+
+    private fun multiChapterBook(): SharedEpubBook {
+        return SharedEpubBook(
+            id = "multi",
+            fileName = "multi.epub",
+            title = "Multi",
+            chapters = listOf(
+                SharedEpubChapter(id = "one", title = "One", plainText = "First chapter text."),
+                SharedEpubChapter(id = "two", title = "Two", plainText = "Second chapter text."),
+                SharedEpubChapter(id = "three", title = "Three", plainText = "Third chapter text.")
+            )
+        )
+    }
+
+    private fun manualRangeBook(): SharedEpubBook {
+        return SharedEpubBook(
+            id = "manual",
+            fileName = "manual.epub",
+            title = "Manual",
+            chapters = listOf(
+                SharedEpubChapter(
+                    id = "one",
+                    title = "One",
+                    plainText = List(300) { "x" }.joinToString("")
                 )
             )
         )

@@ -16,6 +16,7 @@ fun LibraryState.reduce(action: LibraryAction): LibraryState {
             }
             copy(selectedBookIds = selected)
         }
+        is LibraryAction.BookSelectionReplaced -> copy(selectedBookIds = action.bookIds)
         LibraryAction.SelectionCleared -> copy(selectedBookIds = emptySet())
         is LibraryAction.ShelfSelectionToggled -> this
         LibraryAction.ShelfSelectionCleared -> this
@@ -37,6 +38,7 @@ fun SharedReaderScreenState.reduce(action: LibraryAction): SharedReaderScreenSta
             }
             copy(selectedBookIds = selected)
         }
+        is LibraryAction.BookSelectionReplaced -> copy(selectedBookIds = action.bookIds)
         LibraryAction.SelectionCleared -> copy(selectedBookIds = emptySet())
         is LibraryAction.ShelfSelectionToggled -> {
             val selected = if (action.shelfId in selectedShelfIds) {
@@ -50,6 +52,18 @@ fun SharedReaderScreenState.reduce(action: LibraryAction): SharedReaderScreenSta
         is LibraryAction.LibraryPageChanged -> copy(libraryScreenStartPage = action.page)
         is LibraryAction.RecentLimitChanged -> copy(recentFilesLimit = action.limit)
     }
+}
+
+fun SharedReaderScreenState.replaceBookSelectionWithVisibleBooks(
+    visibleBooks: Collection<BookItem>
+): SharedReaderScreenState {
+    val visibleIds = visibleBooks.mapTo(linkedSetOf()) { it.id }
+    val action = if (visibleIds.isNotEmpty() && selectedBookIds.containsAll(visibleIds)) {
+        LibraryAction.SelectionCleared
+    } else {
+        LibraryAction.BookSelectionReplaced(visibleIds)
+    }
+    return reduce(action)
 }
 
 fun SharedReaderScreenState.reduce(action: AppAction): SharedReaderScreenState {
@@ -115,6 +129,12 @@ fun SharedReaderScreenState.reduce(action: AppAction): SharedReaderScreenState {
                 pinnedLibraryBookIds + action.bookId
             }
         )
+        is AppAction.ReaderDefaultSettingsChanged -> copy(
+            readerDefaultSettings = action.settings
+        )
+        is AppAction.PdfReaderDefaultSettingsChanged -> copy(
+            pdfReaderDefaultSettings = action.settings
+        )
         is AppAction.ReaderToolbarPreferencesChanged -> copy(
             readerToolbarPreferences = action.preferences.sanitized()
         )
@@ -129,6 +149,9 @@ fun SharedReaderScreenState.reduce(action: AppAction): SharedReaderScreenState {
         )
         is AppAction.ReaderHighlightPaletteChanged -> copy(
             readerHighlightPalette = action.palette.sanitized()
+        )
+        is AppAction.PdfHighlighterPaletteChanged -> copy(
+            pdfHighlighterPalette = action.palette.sanitized()
         )
         is AppAction.ReaderTtsReplacementPreferencesChanged -> copy(
             readerTtsReplacementPreferences = action.preferences
@@ -145,8 +168,18 @@ fun ReaderSessionState.reduce(action: ReaderAction, readerEngine: ReaderEngine):
         is ReaderAction.GoToProgress -> readerEngine.goToProgress(this, action.progress)
         is ReaderAction.GoToChapter -> readerEngine.goToChapter(this, action.chapterIndex)
         is ReaderAction.GoToLocator -> readerEngine.goToLocator(this, action.locator)
+        is ReaderAction.JumpToPage -> readerEngine.jumpToPage(this, action.pageIndex)
+        is ReaderAction.JumpToPageNumber -> readerEngine.jumpToPageNumber(this, action.pageNumber)
+        is ReaderAction.JumpToChapter -> readerEngine.jumpToChapter(this, action.chapterIndex)
+        is ReaderAction.JumpToLocator -> readerEngine.jumpToLocator(this, action.locator)
         is ReaderAction.VisiblePageChanged -> readerEngine.syncVisiblePage(this, action.pageIndex, action.locator)
         is ReaderAction.GoToSearchResult -> readerEngine.goToSearchResult(this, action.resultIndex)
+        is ReaderAction.JumpToSearchResult -> readerEngine.jumpToSearchResult(this, action.resultIndex)
+        ReaderAction.JumpToNextSearchResult -> readerEngine.jumpToNextSearchResult(this)
+        ReaderAction.JumpToPreviousSearchResult -> readerEngine.jumpToPreviousSearchResult(this)
+        ReaderAction.JumpBack -> readerEngine.jumpBack(this)
+        ReaderAction.JumpForward -> readerEngine.jumpForward(this)
+        ReaderAction.JumpHistoryCleared -> readerEngine.clearJumpHistory(this)
         is ReaderAction.SearchChanged -> readerEngine.search(this, action.query)
         ReaderAction.SearchOpened -> readerEngine.openSearch(this)
         ReaderAction.SearchClosed -> readerEngine.closeSearch(this)

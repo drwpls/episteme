@@ -29,6 +29,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Rect
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -90,6 +91,34 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 
 private const val TAG_LINK_NAV = "LINK_NAV"
+private val READER_WEB_VIEW_JS_INTERFACES = arrayOf(
+    "PageInfoReporter",
+    "ProgressReporter",
+    "ContentBridge",
+    "HighlightBridge",
+    "AutoScrollBridge",
+    "CfiBridge",
+    "SnippetBridge",
+    "TtsBridge",
+    "AiBridge",
+    "FootnoteBridge",
+    "LinkNavBridge"
+)
+
+private fun WebView.releaseReaderResources() {
+    try {
+        stopLoading()
+        READER_WEB_VIEW_JS_INTERFACES.forEach { removeJavascriptInterface(it) }
+        webChromeClient = null
+        webViewClient = WebViewClient()
+        loadDataWithBaseURL(null, "", "text/html", "UTF-8", null)
+        clearHistory()
+        removeAllViews()
+        destroy()
+    } catch (e: Exception) {
+        Timber.w(e, "Failed to fully release EPUB WebView resources")
+    }
+}
 
 private fun getFontCssInjection(): String {
     return """
@@ -314,12 +343,14 @@ class FootnoteJsBridge(
 
 @Suppress("unused")
 class LinkNavJsBridge(
-    private val currentChapterTitle: String
+    private val currentChapterTitle: String,
+    private val onInternalLinkClick: (String) -> Unit
 ) {
     @JavascriptInterface
     fun onLinkClicked(href: String, epubType: String, linkText: String) {
         Timber.tag(TAG_LINK_NAV)
             .d("[JS-CLICK] href='$href', epub:type='$epubType', label='$linkText' | currentChapter='$currentChapterTitle'")
+        onInternalLinkClick(href)
     }
 }
 
@@ -384,6 +415,7 @@ fun ChapterWebView(
     activeHighlightPalette: List<HighlightColor>,
     onUpdatePalette: (Int, HighlightColor) -> Unit,
     onInternalLinkClick: (String) -> Unit,
+    onWebViewDisposed: (WebView) -> Unit = {},
     activeTextureId: String? = null,
     activeTextureAlpha: Float = 0.55f
 ) {
@@ -554,7 +586,7 @@ fun ChapterWebView(
                         }, "AutoScrollBridge"
                     )
 
-                    webChromeClient = object : android.webkit.WebChromeClient() {
+                    webChromeClient = object : WebChromeClient() {
                         override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
                             consoleMessage?.let {
                                 val message = it.message()
@@ -668,7 +700,9 @@ fun ChapterWebView(
                     )
 
                     addJavascriptInterface(
-                        LinkNavJsBridge(chapterTitle), "LinkNavBridge"
+                        LinkNavJsBridge(chapterTitle) { href ->
+                            this.post { onInternalLinkClick(href) }
+                        }, "LinkNavBridge"
                     )
 
                     webViewClient = object : WebViewClient() {
@@ -741,6 +775,37 @@ fun ChapterWebView(
 
                             view?.evaluateJavascript(
                                 "javascript:setTimeout(window.auditTocFragments, 500);",
+                                null
+                            )
+
+                            view?.evaluateJavascript(
+                                """
+                                    javascript:(function() {
+                                        if (window.__readerInternalLinkBridgeInstalled) return;
+                                        window.__readerInternalLinkBridgeInstalled = true;
+                                        document.addEventListener('click', function(event) {
+                                            var target = event.target;
+                                            var anchor = target && target.closest ? target.closest('a[href]') : null;
+                                            if (!anchor && target && target.parentElement && target.parentElement.closest) {
+                                                anchor = target.parentElement.closest('a[href]');
+                                            }
+                                            if (!anchor) return;
+                                            var rawHref = anchor.getAttribute('href') || '';
+                                            if (!rawHref) return;
+                                            if (/^(https?:|mailto:|tel:|javascript:)/i.test(rawHref)) return;
+                                            if (/^\/\//.test(rawHref)) return;
+                                            event.preventDefault();
+                                            var resolvedHref = anchor.href || rawHref;
+                                            if (window.LinkNavBridge && window.LinkNavBridge.onLinkClicked) {
+                                                window.LinkNavBridge.onLinkClicked(
+                                                    resolvedHref,
+                                                    anchor.getAttribute('epub:type') || '',
+                                                    anchor.textContent || ''
+                                                );
+                                            }
+                                        }, true);
+                                    })();
+                                """.trimIndent(),
                                 null
                             )
 
@@ -907,10 +972,19 @@ fun ChapterWebView(
                     loadDataWithBaseURL(baseUrl, initialHtmlContent, "text/html", "UTF-8", null)
                 }
                 webView
-            }, update = { webView ->
-                Timber.d(
-                    "WebView update. Setting Font: ${currentFontFamily.fontFamilyName}"
-                )
+            },
+            modifier = Modifier.fillMaxSize(),
+            onRelease = { releasedWebView ->
+                if (localWebViewRef === releasedWebView) {
+                    localWebViewRef = null
+                }
+                customMenuState?.finishActionModeCallback?.invoke()
+                customMenuState = null
+                onWebViewDisposed(releasedWebView)
+                releasedWebView.releaseReaderResources()
+            },
+            update = { webView ->
+                Timber.d("WebView update. Setting Font: ${currentFontFamily.fontFamilyName}")
                 localWebViewRef = webView
                 onWebViewInstanceCreated(webView)
                 val fontCss = getFontCssInjection().replace("\n", " ")
@@ -946,7 +1020,7 @@ fun ChapterWebView(
                     "javascript:window.CURRENT_HIGHLIGHTS = '${escapedHighlights}'; window.HighlightBridgeHelper.restoreHighlights(window.CURRENT_HIGHLIGHTS);",
                     null
                 )
-                }, modifier = Modifier.fillMaxSize()
+            }
             )
         }
 

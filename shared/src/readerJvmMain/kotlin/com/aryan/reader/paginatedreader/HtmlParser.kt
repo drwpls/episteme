@@ -36,8 +36,40 @@ import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
 import org.jsoup.select.Selector
+import java.util.ArrayDeque
+import java.util.IdentityHashMap
 
 private val unsupportedPseudoElementRegex = Regex("::?(before|after|first-letter|first-line|marker|selection)", RegexOption.IGNORE_CASE)
+private const val MAX_SEMANTIC_TEXT_BLOCK_CHARS = 32_000
+private const val TEXT_APPEND_SLICE_CHARS = 2_048
+private val semanticBlockDescendantTags = setOf(
+    "img",
+    "svg",
+    "math-placeholder",
+    "table",
+    "hr",
+    "div",
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "ul",
+    "ol",
+    "li",
+    "blockquote",
+    "figure",
+    "article",
+    "aside",
+    "header",
+    "footer",
+    "nav",
+    "section",
+    "main"
+)
+private val forcedStandaloneSemanticTags = setOf("img", "svg", "math-placeholder", "hr", "table")
 
 interface HtmlResourceResolver {
     fun resolvePath(chapterAbsPath: String, extractionBasePath: String, src: String): String?
@@ -90,6 +122,12 @@ private fun String.capitalizeWords(): String =
     split(' ').joinToString(" ") { word ->
         if (word.isNotEmpty()) word.replaceFirstChar { it.titlecase() } else ""
     }
+
+private data class SemanticTextChunk(
+    val text: String,
+    val spans: List<SemanticSpan>,
+    val startCharOffsetInSource: Int
+)
 
 /**
  * The public entry point for converting HTML to a list of [SemanticBlock]s.
@@ -144,13 +182,14 @@ private class SemanticHtmlParser(
     private val adaptThemeColors: Boolean
 ) {
     private val styleCache = mutableMapOf<String, CssStyle>()
+    private val semanticBlockDescendantCache = IdentityHashMap<Element, Boolean>()
     private var combinedRules: OptimizedCssRules = cssRules
     private val currentFontFamilyMap: MutableMap<String, FontFamily> = fontFamilyMap.toMutableMap()
     private var nextBlockIndex = 0
 
     fun parse(html: String): List<SemanticBlock> {
         val document = Jsoup.parse(html, chapterAbsPath)
-        val inlineCssContent = document.head().select("style").joinToString(separator = "\n") { it.data() }
+        val inlineCssContent = document.head().getElementsByTag("style").joinToString(separator = "\n") { it.data() }
 
         if (inlineCssContent.isNotBlank()) {
             HtmlParserLog.d("Found inline <style> content in $chapterAbsPath. Parsing...")
@@ -175,6 +214,61 @@ private class SemanticHtmlParser(
 
         val body = document.body()
         return parseContainer(body, getElementStyle(body))
+    }
+
+    private inline fun Element.anyChildElement(predicate: (Element) -> Boolean): Boolean {
+        childNodes().forEach { child ->
+            if (child is Element && predicate(child)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun Element.hasSemanticBlockDescendant(): Boolean {
+        semanticBlockDescendantCache[this]?.let { return it }
+
+        if (anyChildElement { child -> child.tagName().lowercase() in semanticBlockDescendantTags }) {
+            semanticBlockDescendantCache[this] = true
+            return true
+        }
+
+        val stack = ArrayDeque<Element>()
+        stack.add(this)
+        val expanded = IdentityHashMap<Element, Boolean>()
+
+        while (stack.isNotEmpty()) {
+            val current = stack.peekLast()
+            if (semanticBlockDescendantCache.containsKey(current)) {
+                stack.removeLast()
+                continue
+            }
+
+            if (expanded.put(current, true) == null) {
+                current.childNodes().forEach { child ->
+                    if (child is Element && !semanticBlockDescendantCache.containsKey(child)) {
+                        stack.add(child)
+                    }
+                }
+                continue
+            }
+
+            stack.removeLast()
+            val hasSemanticDescendant = current.anyChildElement { child ->
+                child.tagName().lowercase() in semanticBlockDescendantTags ||
+                        semanticBlockDescendantCache[child] == true
+            }
+            semanticBlockDescendantCache[current] = hasSemanticDescendant
+        }
+
+        return semanticBlockDescendantCache[this] == true
+    }
+
+    private fun Element.isEffectivelySemanticBlock(): Boolean {
+        val tagName = tagName().lowercase()
+        return isBlock ||
+                tagName in forcedStandaloneSemanticTags ||
+                (!isBlock && hasSemanticBlockDescendant())
     }
 
     private fun parseNodeToSemanticBlocks(
@@ -322,7 +416,7 @@ private class SemanticHtmlParser(
             "math-placeholder" -> parseMathPlaceholderToSemantic(element, elementStyle)
             "img" -> parseImageElementToSemantic(element, elementStyle)?.let { listOf(it) } ?: emptyList()
             "h1", "h2", "h3", "h4", "h5", "h6" -> {
-                val hasNonTextChildren = element.select("img, svg, math-placeholder, table, hr, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li, blockquote, figure, article, aside, header, footer, nav, section, main").isNotEmpty()
+                val hasNonTextChildren = element.hasSemanticBlockDescendant()
                 if (hasNonTextChildren) {
                     val level = tagName.substring(1).toIntOrNull() ?: 1
                     val fontSizeMultiplier = when (level) {
@@ -371,7 +465,7 @@ private class SemanticHtmlParser(
             "hr" -> listOf(SemanticSpacer(style = elementStyle, elementId = elementId, cfi = cfi, blockIndex = nextBlockIndex++))
             "ul", "ol" -> parseListElementToSemantic(element, elementStyle)
             else -> {
-                val hasBlockDescendant = !element.isBlock && element.select("img, svg, math-placeholder, hr, table, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li, blockquote, figure, article, aside, header, footer, nav, section, main").isNotEmpty()
+                val hasBlockDescendant = !element.isBlock && element.hasSemanticBlockDescendant()
                 if (element.isBlock || hasBlockDescendant) {
                     parseContainer(element, elementStyle)
                 } else {
@@ -397,32 +491,44 @@ private class SemanticHtmlParser(
 
         fun flushTextBuffer() {
             if (textNodesBuffer.isEmpty()) return
-            val (text, spans) = buildSemanticTextAndSpansFromNodes(textNodesBuffer, style)
-            if (text.isNotBlank()) {
-                val finalSpans = spans.toMutableList()
+            val textChunks = buildSemanticTextAndSpanChunksFromNodes(textNodesBuffer, style)
+            val containerElementId = element.id().ifBlank { null }
+            val containerCfi = element.getCfiPath()
+            textChunks.forEachIndexed { chunkIndex, chunk ->
+                if (chunk.text.isBlank()) return@forEachIndexed
+
+                val finalSpans = chunk.spans.toMutableList()
                 if (element.tagName().lowercase() == "a") {
                     val href = element.attr("href").ifBlank { null }
                     if (href != null) {
                         finalSpans.add(SemanticSpan(
                             start = 0,
-                            end = text.length,
+                            end = chunk.text.length,
                             style = style,
                             linkHref = href,
                             tag = "a",
-                            elementId = element.id().ifBlank { null }
+                            elementId = containerElementId.takeIf { chunkIndex == 0 }
                         ))
                     }
                 }
-                children.add(SemanticParagraph(text, finalSpans, style, element.id().ifBlank { null }, element.getCfiPath(), blockIndex = nextBlockIndex++))
+                children.add(
+                    SemanticParagraph(
+                        text = chunk.text,
+                        spans = finalSpans,
+                        style = style,
+                        elementId = containerElementId.takeIf { chunkIndex == 0 },
+                        cfi = containerCfi,
+                        startCharOffsetInSource = chunk.startCharOffsetInSource,
+                        blockIndex = nextBlockIndex++
+                    )
+                )
             }
             textNodesBuffer.clear()
         }
 
         element.childNodes().forEach { node ->
             if (node is Element) {
-                val tagName = node.tagName().lowercase()
-                val isEffectivelyBlock = node.isBlock || tagName in listOf("img", "svg", "math-placeholder", "hr") ||
-                        (!node.isBlock && node.select("img, svg, math-placeholder, hr, table, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li, blockquote, figure, article, aside, header, footer, nav, section, main").isNotEmpty())
+                val isEffectivelyBlock = node.isEffectivelySemanticBlock()
 
                 if (isEffectivelyBlock) {
                     flushTextBuffer()
@@ -450,78 +556,189 @@ private class SemanticHtmlParser(
         nodes: List<Node>,
         rootStyle: CssStyle
     ): Pair<String, List<SemanticSpan>> {
+        val chunks = buildSemanticTextAndSpanChunksFromNodes(nodes, rootStyle)
+        val firstChunk = chunks.firstOrNull() ?: return "" to emptyList()
+        return firstChunk.text to firstChunk.spans
+    }
+
+    private fun buildSemanticTextAndSpanChunksFromNodes(
+        nodes: List<Node>,
+        rootStyle: CssStyle
+    ): List<SemanticTextChunk> {
         val textBuilder = StringBuilder()
         val spans = mutableListOf<SemanticSpan>()
+        val chunks = mutableListOf<SemanticTextChunk>()
+        val activeSpans = mutableListOf<ActiveSemanticSpan>()
+        var currentChunkStartOffset = 0
 
-        fun processNode(node: Node, inheritedStyle: CssStyle) {
-            when (node) {
-                is TextNode -> {
-                    var text = node.wholeText.replace('\n', ' ')
-                    when (inheritedStyle.textTransform) {
-                        "uppercase" -> text = text.uppercase()
-                        "lowercase" -> text = text.lowercase()
-                        "capitalize" -> text = text.capitalizeWords()
-                    }
-                    textBuilder.append(text)
-                }
-                is Element -> {
-                    if (node.tagName().lowercase() == "br") {
-                        textBuilder.append('\n'); return
-                    }
-                    val currentElementStyle = getElementStyle(node)
-                    val newStyle = inheritedStyle.merge(currentElementStyle)
-                    val startIndex = textBuilder.length
-                    node.childNodes().forEach { processNode(it, newStyle) }
-                    val endIndex = textBuilder.length
-
-                    val elementId = node.id().ifBlank { null }
-                    val isAnchor = node.tagName().lowercase() == "a" || elementId != null
-
-                    // Capture span if it has content OR if it has an ID (anchor)
-                    if (startIndex < endIndex || elementId != null) {
-                        val href = if (node.tagName().lowercase() == "a") node.attr("href").ifBlank { null } else null
-                        spans.add(SemanticSpan(
-                            start = startIndex,
-                            end = endIndex,
-                            style = newStyle,
-                            linkHref = href,
-                            tag = node.tagName().lowercase(),
-                            elementId = elementId // Pass the ID here
-                        ))
-                    }
-                }
+        fun addSpan(
+            start: Int,
+            end: Int,
+            style: CssStyle,
+            linkHref: String?,
+            tag: String,
+            elementId: String?
+        ) {
+            if (start < end || elementId != null) {
+                spans.add(
+                    SemanticSpan(
+                        start = start.coerceAtLeast(0),
+                        end = end.coerceAtLeast(start),
+                        style = style,
+                        linkHref = linkHref,
+                        tag = tag,
+                        elementId = elementId
+                    )
+                )
             }
         }
-        nodes.forEach { processNode(it, rootStyle) }
 
-        var processedText = textBuilder.toString()
-        if (processedText.isNotEmpty() && processedText.last().isWhitespace()) {
-            // 1. Find the index where trailing whitespace begins
-            var newLength = processedText.length
-            while (newLength > 0 && processedText[newLength - 1].isWhitespace()) {
+        fun trimTrailingWhitespace(
+            text: String,
+            sourceSpans: List<SemanticSpan>
+        ): Pair<String, List<SemanticSpan>> {
+            var newLength = text.length
+            while (newLength > 0 && text[newLength - 1].isWhitespace()) {
                 newLength--
             }
 
-            // 2. Cut the text
-            processedText = processedText.substring(0, newLength)
+            if (newLength == text.length) return text to sourceSpans
 
-            // 3. Filter or Cap spans so they don't point to indices that no longer exist
-            val adjustedSpans = spans.mapNotNull { span ->
+            val adjustedSpans = sourceSpans.mapNotNull { span ->
                 if (span.start >= newLength) {
-                    // Span started in the whitespace area, remove it
                     null
                 } else if (span.end > newLength) {
-                    // Span ended in the whitespace area, cap it
                     span.copy(end = newLength)
                 } else {
                     span
                 }
             }
-            return processedText to adjustedSpans
+            return text.substring(0, newLength) to adjustedSpans
         }
 
-        return processedText to spans
+        fun flushChunk(trimTrailing: Boolean) {
+            if (textBuilder.isEmpty()) return
+
+            activeSpans.forEach { active ->
+                addSpan(
+                    start = active.startInChunk,
+                    end = textBuilder.length,
+                    style = active.style,
+                    linkHref = active.linkHref,
+                    tag = active.tag,
+                    elementId = active.elementId
+                )
+            }
+
+            val rawText = textBuilder.toString()
+            val rawLength = rawText.length
+            val (trimmedText, trimmedSpans) = if (trimTrailing) {
+                trimTrailingWhitespace(rawText, spans)
+            } else {
+                rawText to spans.toList()
+            }
+            if (trimmedText.isNotBlank()) {
+                chunks.add(
+                    SemanticTextChunk(
+                        text = trimmedText,
+                        spans = trimmedSpans,
+                        startCharOffsetInSource = currentChunkStartOffset
+                    )
+                )
+            }
+
+            currentChunkStartOffset += rawLength
+            textBuilder.clear()
+            spans.clear()
+            activeSpans.forEach { it.startInChunk = 0 }
+        }
+
+        fun appendText(text: String) {
+            var offset = 0
+            while (offset < text.length) {
+                if (textBuilder.length >= MAX_SEMANTIC_TEXT_BLOCK_CHARS) {
+                    flushChunk(trimTrailing = false)
+                }
+                val available = (MAX_SEMANTIC_TEXT_BLOCK_CHARS - textBuilder.length).coerceAtLeast(1)
+                val end = (offset + available).coerceAtMost(text.length)
+                textBuilder.append(text, offset, end)
+                offset = end
+                if (textBuilder.length >= MAX_SEMANTIC_TEXT_BLOCK_CHARS) {
+                    flushChunk(trimTrailing = false)
+                }
+            }
+        }
+
+        fun appendTransformedText(rawText: String, textTransform: String?) {
+            var start = 0
+            while (start < rawText.length) {
+                val end = (start + TEXT_APPEND_SLICE_CHARS).coerceAtMost(rawText.length)
+                val normalizedSlice = buildString(end - start) {
+                    for (i in start until end) {
+                        append(if (rawText[i] == '\n') ' ' else rawText[i])
+                    }
+                }
+                val transformedSlice = when (textTransform) {
+                    "uppercase" -> normalizedSlice.uppercase()
+                    "lowercase" -> normalizedSlice.lowercase()
+                    "capitalize" -> normalizedSlice.capitalizeWords()
+                    else -> normalizedSlice
+                }
+                appendText(transformedSlice)
+                start = end
+            }
+        }
+
+        fun processNode(node: Node, inheritedStyle: CssStyle) {
+            when (node) {
+                is TextNode -> {
+                    appendTransformedText(node.wholeText, inheritedStyle.textTransform)
+                }
+                is Element -> {
+                    if (node.tagName().lowercase() == "br") {
+                        appendText("\n"); return
+                    }
+                    val currentElementStyle = getElementStyle(node)
+                    val newStyle = inheritedStyle.merge(currentElementStyle)
+                    val tag = node.tagName().lowercase()
+                    val href = if (tag == "a") node.attr("href").ifBlank { null } else null
+                    val elementId = node.id().ifBlank { null }
+                    val activeSpan = ActiveSemanticSpan(
+                        startInChunk = textBuilder.length,
+                        style = newStyle,
+                        linkHref = href,
+                        tag = tag,
+                        elementId = elementId
+                    )
+                    activeSpans.add(activeSpan)
+                    node.childNodes().forEach { processNode(it, newStyle) }
+                    activeSpans.removeAt(activeSpans.lastIndex)
+                    val endIndex = textBuilder.length
+
+                    // Capture span if it has content OR if it has an ID (anchor)
+                    addSpan(
+                        start = activeSpan.startInChunk,
+                        end = endIndex,
+                        style = newStyle,
+                        linkHref = href,
+                        tag = tag,
+                        elementId = elementId
+                    )
+                }
+            }
+        }
+        nodes.forEach { processNode(it, rootStyle) }
+        flushChunk(trimTrailing = true)
+        return chunks
     }
+
+    private data class ActiveSemanticSpan(
+        var startInChunk: Int,
+        val style: CssStyle,
+        val linkHref: String?,
+        val tag: String,
+        val elementId: String?
+    )
 
     private fun parseMathPlaceholderToSemantic(element: Element, style: CssStyle): List<SemanticBlock> {
         val uniqueId = element.id()
@@ -532,7 +749,7 @@ private class SemanticHtmlParser(
         var svgViewBox: String? = null
         if (svgContent != null) {
             val svgDoc = Jsoup.parse(svgContent)
-            svgDoc.selectFirst("svg")?.let {
+            svgDoc.getElementsByTag("svg").firstOrNull()?.let {
                 svgWidth = it.attr("width")
                 svgHeight = it.attr("height")
                 svgViewBox = it.attr("viewBox")
@@ -564,7 +781,7 @@ private class SemanticHtmlParser(
 
             return SemanticImage(
                 path = imagePath,
-                altText = svgElement.selectFirst("title")?.text() ?: "Cover Image",
+                altText = svgElement.getElementsByTag("title").firstOrNull()?.text() ?: "Cover Image",
                 intrinsicWidth = width,
                 intrinsicHeight = height,
                 style = style,
@@ -575,8 +792,8 @@ private class SemanticHtmlParser(
         }
 
         HtmlParserLog.d("Parsing genuine SVG content into SemanticMath block.")
-        val title = svgElement.selectFirst("title")?.text()
-        val desc = svgElement.selectFirst("desc")?.text()
+        val title = svgElement.getElementsByTag("title").firstOrNull()?.text()
+        val desc = svgElement.getElementsByTag("desc").firstOrNull()?.text()
         val altText = title ?: desc ?: "SVG Image"
 
         return SemanticMath(
@@ -644,7 +861,7 @@ private class SemanticHtmlParser(
     }
 
     private fun parseTableElementToSemantic(tableElement: Element, tableStyle: CssStyle): SemanticTable? {
-        val rows = tableElement.select("tr").mapNotNull { rowElement ->
+        val rows = tableElement.getElementsByTag("tr").mapNotNull { rowElement ->
             val rowStyle = getElementStyle(rowElement)
             if (rowStyle.display == "none") return@mapNotNull null
 

@@ -24,6 +24,9 @@ class DesktopFolderMetadataExtractorTest {
                   <metadata>
                     <dc:title>Direct EPUB</dc:title>
                     <dc:creator>Ada Lovelace</dc:creator>
+                    <dc:description>&lt;p&gt;Metadata summary&lt;/p&gt;</dc:description>
+                    <meta name="calibre:series" content="Computing Notes" />
+                    <meta name="calibre:series_index" content="2" />
                     <meta name="cover" content="cover-image" />
                   </metadata>
                   <manifest>
@@ -42,10 +45,47 @@ class DesktopFolderMetadataExtractorTest {
         val enriched = result.books.single()
         assertEquals("Direct EPUB", enriched.title)
         assertEquals("Ada Lovelace", enriched.author)
+        assertEquals("<p>Metadata summary</p>", enriched.description)
+        assertEquals("Computing Notes", enriched.seriesName)
+        assertEquals(2.0, enriched.seriesIndex)
+        assertEquals("Direct EPUB", enriched.originalTitle)
+        assertEquals("Ada Lovelace", enriched.originalAuthor)
+        assertEquals("Computing Notes", enriched.originalSeriesName)
+        assertEquals(2.0, enriched.originalSeriesIndex)
+        assertEquals("<p>Metadata summary</p>", enriched.originalDescription)
+        assertEquals(epub.lastModified(), enriched.fileContentModifiedTimestamp)
         assertTrue(enriched.folderTextMetadataParsed)
         assertTrue(File(assertNotNull(enriched.coverImagePath)).isFile)
         assertEquals(1, result.stats.updatedBooks)
         assertEquals(1, result.stats.coversUpdated)
+    }
+
+    @Test
+    fun `opened epub gets embedded cover`() = withCoverCacheDir { tempDir ->
+        val epub = File(tempDir, "opened.epub")
+        writeEpub(
+            target = epub,
+            opf = """
+                <package xmlns:dc="http://purl.org/dc/elements/1.1/">
+                  <metadata>
+                    <dc:title>Opened EPUB</dc:title>
+                    <dc:creator>Mary Shelley</dc:creator>
+                    <meta name="cover" content="cover-image" />
+                  </metadata>
+                  <manifest>
+                    <item id="cover-image" href="images/cover.png" media-type="image/png" />
+                  </manifest>
+                </package>
+            """.trimIndent()
+        )
+        val book = bookFor(epub, FileType.EPUB, title = null)
+
+        val enriched = DesktopFolderMetadataExtractor.enrichOpenedBook(book)
+
+        assertEquals("Opened EPUB", enriched.title)
+        assertEquals("Mary Shelley", enriched.author)
+        assertTrue(enriched.folderTextMetadataParsed)
+        assertTrue(File(assertNotNull(enriched.coverImagePath)).isFile)
     }
 
     @Test

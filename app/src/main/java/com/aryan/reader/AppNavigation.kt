@@ -65,6 +65,7 @@ object AppDestinations {
     const val SUPPORT_PROJECT_SCREEN_ROUTE = "support_project_screen_route"
     const val FONTS_SCREEN_ROUTE = "fonts_screen_route"
     const val AI_SETTINGS_SCREEN_ROUTE = "ai_settings_screen_route"
+    const val SETTINGS_SCREEN_ROUTE = "settings_screen_route"
 }
 
 private fun NavHostController.isReadyForBackStackChange(): Boolean {
@@ -146,7 +147,7 @@ fun AppNavigation(
     LaunchedEffect(currentRoute, uiState.selectedFileType, uiState.isLoading, uiState.selectedEpubBook, uiState.selectedPdfUri) {
         if (!uiState.isLoading) {
             when (uiState.selectedFileType) {
-                FileType.PDF, FileType.CBZ, FileType.CBR, FileType.CB7 -> {
+                FileType.PDF, FileType.CBZ, FileType.CBR, FileType.CB7, FileType.PPTX -> {
                     if (uiState.selectedPdfUri != null) {
                         if (currentRoute != AppDestinations.PDF_VIEWER_ROUTE) {
                             navController.syncRouteTo(AppDestinations.PDF_VIEWER_ROUTE)
@@ -161,6 +162,11 @@ fun AppNavigation(
                     }
                 }
                 null -> {
+                    if (currentRoute == AppDestinations.PDF_VIEWER_ROUTE || currentRoute == AppDestinations.EPUB_READER_ROUTE) {
+                        navController.syncRouteTo(AppDestinations.MAIN_ROUTE)
+                    }
+                }
+                FileType.UNKNOWN -> {
                     if (currentRoute == AppDestinations.PDF_VIEWER_ROUTE || currentRoute == AppDestinations.EPUB_READER_ROUTE) {
                         navController.syncRouteTo(AppDestinations.MAIN_ROUTE)
                     }
@@ -225,6 +231,8 @@ fun AppNavigation(
                             CircularProgressIndicator()
                         }
                     }
+
+                    CustomTopBanner(bannerMessage = uiState.bannerMessage)
                 }
             } else if (uiState.isLoading) {
                 Timber.d("PDF URI is null but loading is in progress. Showing loading indicator.")
@@ -301,6 +309,8 @@ fun AppNavigation(
                                 CircularProgressIndicator()
                             }
                         }
+
+                        CustomTopBanner(bannerMessage = uiState.bannerMessage)
                     }
                 }
                 isLoading -> {
@@ -358,6 +368,14 @@ fun AppNavigation(
 
         composable(route = AppDestinations.AI_SETTINGS_SCREEN_ROUTE) {
             AiSettingsScreen(
+                onBackClick = { navController.popBackStackIfReady() }
+            )
+        }
+
+        composable(route = AppDestinations.SETTINGS_SCREEN_ROUTE) {
+            SettingsScreen(
+                viewModel = viewModel,
+                navController = navController,
                 onBackClick = { navController.popBackStackIfReady() }
             )
         }
