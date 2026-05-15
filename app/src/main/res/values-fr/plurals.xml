@@ -6,7 +6,7 @@
         <item quantity="other">%1$d livres</item>
     </plurals>
     <plurals name="book_word">
-        <item quantity="one">livres</item>
+        <item quantity="one">livre</item>
         <item quantity="many">livres</item>
         <item quantity="other">livres</item>
     </plurals>
@@ -19,5 +19,45 @@
         <item quantity="one">%1$d résultat trouvé</item>
         <item quantity="many">%1$d résultats trouvés</item>
         <item quantity="other">%1$d résultats trouvés</item>
+    </plurals>
+    <plurals name="dialog_delete_permanently">
+        <item quantity="one">Supprimer le fichier définitivement</item>
+        <item quantity="many">Supprimer les fichiers définitivement</item>
+        <item quantity="other">Supprimer les fichiers définitivement</item>
+    </plurals>
+    <plurals name="dialog_permanently_delete_desc">
+        <item quantity="one">Voulez-vous supprimer définitivement %1$d fichier sélectionné de votre appareil ? Cette action est irréversible.</item>
+        <item quantity="many">Voulez-vous supprimer définitivement %1$d fichiers sélectionnés de votre appareil ? Cette action est irréversible.</item>
+        <item quantity="other">Voulez-vous supprimer définitivement %1$d fichiers sélectionnés de votre appareil ? Cette action est irréversible.</item>
+    </plurals>
+    <plurals name="dialog_remove_recents_desc">
+        <item quantity="one">Voulez-vous supprimer %1$d fichier sélectionné de la liste des fichiers récents ? Il réapparaitra si vous le rouvrez depuis la bibliothèque.</item>
+        <item quantity="many">Voulez-vous supprimer %1$d fichiers sélectionnés de la liste des fichiers récents ? Il réapparaitra si vous le rouvrez depuis la bibliothèque.</item>
+        <item quantity="other">Voulez-vous supprimer %1$d fichiers sélectionnés de la liste des fichiers récents ? Il réapparaitra si vous le rouvrez depuis la bibliothèque.</item>
+    </plurals>
+    <plurals name="dialog_remove_from_shelf_desc">
+        <item quantity="one">Êtes-vous sûr de vouloir enlever %1$d livre de l\'étagère « %2$s » ? Le livre restera dans votre bibliothèque et apparaitra sous « Sans étagère ».</item>
+        <item quantity="many">Êtes-vous sûr de vouloir enlever %1$d livres de l\'étagère « %2$s » ? Les livres resteront dans votre bibliothèque et apparaitront sous « Sans étagère ».</item>
+        <item quantity="other">Êtes-vous sûr de vouloir enlever %1$d livres de l\'étagère « %2$s » ? Les livres resteront dans votre bibliothèque et apparaitront sous « Sans étagère ».</item>
+    </plurals>
+    <plurals name="banner_books_removed_library">
+        <item quantity="one">%1$d livre retiré de la bibliothèque.</item>
+        <item quantity="many">%1$d livres retirés de la bibliothèque.</item>
+        <item quantity="other">%1$d livres retirés de la bibliothèque.</item>
+    </plurals>
+    <plurals name="folder_count">
+        <item quantity="one">%1$d dossier</item>
+        <item quantity="many">%1$d dossiers</item>
+        <item quantity="other">%1$d dossiers</item>
+    </plurals>
+    <plurals name="tag_count">
+        <item quantity="one">%1$d étiquette</item>
+        <item quantity="many">%1$d étiquettes</item>
+        <item quantity="other">%1$d étiquettes</item>
+    </plurals>
+    <plurals name="tts_cache_chunk_count_parenthetical">
+        <item quantity="one">(%1$d morceau)</item>
+        <item quantity="many">(%1$d morceaux)</item>
+        <item quantity="other">(%1$d morceaux)</item>
     </plurals>
 </resources>

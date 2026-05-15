@@ -54,4 +54,28 @@
         <item quantity="many">%1$d книг удалены из библиотеки.</item>
         <item quantity="other">%1$d книг удалены из библиотеки.</item>
     </plurals>
+    <plurals name="search_matches_count">
+        <item quantity="one">найден %1$d результат</item>
+        <item quantity="few">найдено %1$d результата</item>
+        <item quantity="many">найдено %1$d результатов</item>
+        <item quantity="other">найдено %1$d результатов</item>
+    </plurals>
+    <plurals name="folder_count">
+        <item quantity="one">%1$d папка</item>
+        <item quantity="few">%1$d папки</item>
+        <item quantity="many">%1$d папок</item>
+        <item quantity="other">%1$d папок</item>
+    </plurals>
+    <plurals name="tag_count">
+        <item quantity="one">%1$d тэг</item>
+        <item quantity="few">%1$d тэга</item>
+        <item quantity="many">%1$d тэгов</item>
+        <item quantity="other">%1$d тэгов</item>
+    </plurals>
+    <plurals name="tts_cache_chunk_count_parenthetical">
+        <item quantity="one">(%1$d часть)</item>
+        <item quantity="few">(%1$d части)</item>
+        <item quantity="many">(%1$d частей)</item>
+        <item quantity="other">(%1$d частей)</item>
+    </plurals>
 </resources>
