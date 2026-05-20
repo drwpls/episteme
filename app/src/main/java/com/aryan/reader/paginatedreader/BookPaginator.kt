@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
 import com.aryan.reader.SearchResult
 import com.aryan.reader.epub.EpubChapter
+import com.aryan.reader.epub.contentFilePath
 import com.aryan.reader.paginatedreader.data.BookCacheDao
 import com.aryan.reader.paginatedreader.data.BookProcessingInput
 import com.aryan.reader.paginatedreader.data.BookProcessingWorker
@@ -102,6 +103,14 @@ private data class PaginationRequest(val chapterIndex: Int, val priority: Int) :
 }
 
 private const val PAGE_INDEX_ANCHOR_SEPARATOR = "\u001F"
+
+private fun String.normalizedImageSourceForNavigation(): String {
+    return substringBefore('#')
+        .substringBefore('?')
+        .replace('\\', '/')
+        .removePrefix("file://")
+        .lowercase()
+}
 
 private data class TextRangeIndex(
     val pageInChapter: Int,
@@ -394,7 +403,7 @@ class BookPaginator(
     }
 
     private fun chapterContentVersion(chapter: EpubChapter): Int {
-        val backingFile = java.io.File(extractionBasePath, chapter.htmlFilePath)
+        val backingFile = java.io.File(extractionBasePath, chapter.contentFilePath())
         return buildString {
             append(chapter.absPath)
             append('|')
@@ -656,6 +665,43 @@ class BookPaginator(
         finalPageIndex
     }
 
+    suspend fun findStablePageForImageSource(
+        chapterIndex: Int,
+        sourcePath: String,
+        elementId: String?,
+        ordinalInChapter: Int
+    ): Pair<Int, Locator>? = withContext(Dispatchers.IO) {
+        val chapter = chapters.getOrNull(chapterIndex) ?: return@withContext null
+        val imageBlocks = getAllBlocks(getBlocksForChapter(chapter, chapterIndex))
+            .filterIsInstance<ImageBlock>()
+        if (imageBlocks.isEmpty()) return@withContext null
+
+        val normalizedSource = sourcePath.normalizedImageSourceForNavigation()
+        val normalizedFileName = normalizedSource.substringAfterLast('/')
+        val matchingBySource = imageBlocks.filter { block ->
+            val normalizedBlockPath = block.path.normalizedImageSourceForNavigation()
+            normalizedBlockPath == normalizedSource ||
+                normalizedBlockPath.endsWith("/$normalizedFileName") ||
+                normalizedSource.endsWith("/${normalizedBlockPath.substringAfterLast('/')}")
+        }
+        val targetBlock = elementId
+            ?.takeIf { it.isNotBlank() }
+            ?.let { id -> imageBlocks.firstOrNull { it.elementId == id } }
+            ?: matchingBySource.getOrNull(ordinalInChapter.coerceAtLeast(0))
+            ?: matchingBySource.firstOrNull()
+            ?: return@withContext null
+
+        val locator = Locator(
+            chapterIndex = chapterIndex,
+            blockIndex = targetBlock.blockIndex,
+            charOffset = 0
+        )
+        val targetPage = findStablePageForLocator(locator)
+            ?: findStableChapterStartPage(chapterIndex)
+            ?: return@withContext null
+        targetPage to locator
+    }
+
     suspend fun getTtsChunksForChapter(chapterIndex: Int, startingFromPageInChapter: Int = 0): List<TtsChunk>? {
         val pages = ensureChapterPaginated(chapterIndex)
         if (pages.isNullOrEmpty()) {
@@ -766,7 +812,7 @@ class BookPaginator(
 
                     var shouldIgnoreCache = false
                     if (isCacheEmpty && isLazyChapter) {
-                        val file = java.io.File(extractionBasePath, chapter.htmlFilePath)
+                        val file = java.io.File(extractionBasePath, chapter.contentFilePath())
                         if (file.exists() && file.length() > 0) {
                             Timber.tag("ReflowPaginationDiag").w("getBlocksForChapter: Cache HIT but empty for lazy chapter $chapterIndex. Backing file exists (${file.length()} bytes). Ignoring cache.")
                             shouldIgnoreCache = true
@@ -789,7 +835,7 @@ class BookPaginator(
 
         var htmlToParse = chapter.htmlContent
         if (htmlToParse.isEmpty()) {
-            val file = java.io.File(extractionBasePath, chapter.htmlFilePath)
+            val file = java.io.File(extractionBasePath, chapter.contentFilePath())
             if (file.exists()) {
                 Timber.tag("ReflowPaginationDiag").d("getBlocksForChapter: Lazy loading content from disk for chapter $chapterIndex: ${file.name} (${file.length()} bytes)")
                 try {
@@ -1187,7 +1233,7 @@ class BookPaginator(
         Timber.tag("POS_DIAG").d("getPlainTextForChapter: chapterIndex=$chapterIndex, chapterTitle='${chapter.title}', hasInMemoryContent=${chapter.htmlContent.isNotEmpty()}")
         val htmlToParse = chapter.htmlContent.ifEmpty {
             try {
-                val file = java.io.File(extractionBasePath, chapter.htmlFilePath)
+                val file = java.io.File(extractionBasePath, chapter.contentFilePath())
                 if (file.exists()) file.readText() else ""
             } catch (_: Exception) {
                 ""

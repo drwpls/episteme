@@ -86,9 +86,15 @@ import com.aryan.reader.paginatedreader.Locator
 import com.aryan.reader.paginatedreader.data.BookCacheDatabase
 import com.aryan.reader.paginatedreader.data.BookProcessingWorker
 import com.aryan.reader.pdf.PdfCoverGenerator
+import com.aryan.reader.pdf.PDF_BLANK_PAGE_PERSISTENCE_TAG
 import com.aryan.reader.pdf.PdfUserHighlight
+import com.aryan.reader.pdf.PdfiumCoreProvider
+import com.aryan.reader.pdf.PdfiumEngineProvider
 import com.aryan.reader.pdf.PdfiumAnnotationExporter
 import com.aryan.reader.pdf.ReflowWorker
+import com.aryan.reader.pdf.pdfLayoutDebugSummary
+import com.aryan.reader.pdf.remapPdfAnnotationsForLayoutChange
+import com.aryan.reader.pdf.remapPdfBookmarksJsonForLayoutChange
 import com.aryan.reader.pdf.data.PageLayoutRepository
 import com.aryan.reader.pdf.data.PdfAnnotation
 import com.aryan.reader.pdf.data.PdfAnnotationRepository
@@ -98,17 +104,18 @@ import com.aryan.reader.pdf.data.PdfTextBoxRepository
 import com.aryan.reader.pdf.data.PdfTextRepository
 import com.aryan.reader.pdf.data.VirtualPage
 import com.aryan.reader.pptx.PptxCoverGenerator
+import com.aryan.reader.shared.SharedFileCapabilities
 import com.aryan.reader.shared.SharedLibraryEditor
 import com.aryan.reader.shared.SharedImportOutcomeCounts
 import com.aryan.reader.shared.SharedImportPlanner
 import com.aryan.reader.shared.pdf.SharedPdfAnnotationSidecarCodec
 import com.aryan.reader.shared.AppAction as SharedAppAction
 import com.aryan.reader.shared.LibraryAction as SharedLibraryAction
-import io.legere.pdfiumandroid.PdfiumCore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
@@ -558,6 +565,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             activeTabBookId = prefs.getString(KEY_ACTIVE_TAB, null),
             externalFileBehavior = prefs.getString(KEY_EXTERNAL_FILE_BEHAVIOR, "ASK") ?: "ASK",
             useStrictFileFilter = prefs.getBoolean(KEY_USE_STRICT_FILE_FILTER, false),
+            usePdfFileNameAsDisplayName = prefs.getBoolean(KEY_USE_PDF_FILE_NAME_AS_DISPLAY_NAME, false),
             isScreenCaptureProtectionEnabled = prefs.getBoolean(KEY_SCREEN_CAPTURE_PROTECTION, false),
             appThemeMode = try {
                 AppThemeMode.valueOf(prefs.getString(KEY_APP_THEME_MODE, AppThemeMode.SYSTEM.name) ?: AppThemeMode.SYSTEM.name)
@@ -568,6 +576,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             appTextDimFactorLight = prefs.getFloat(KEY_APP_TEXT_DIM_FACTOR_LIGHT, prefs.getFloat(KEY_APP_TEXT_DIM_FACTOR, 1.0f)),
             appTextDimFactorDark = prefs.getFloat(KEY_APP_TEXT_DIM_FACTOR_DARK, prefs.getFloat(KEY_APP_TEXT_DIM_FACTOR, 1.0f)),
             appSeedColor = if (prefs.contains(KEY_APP_SEED_COLOR)) androidx.compose.ui.graphics.Color(prefs.getInt(KEY_APP_SEED_COLOR, 0)) else null,
+            appFontPreference = loadAppFontPreference(prefs),
             customAppThemes = loadCustomAppThemes(prefs)
         )
     )
@@ -718,6 +727,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     selectedBookId = bookId,
                     selectedFileType = item.type,
                     initialPageInBook = item.lastPage,
+                    initialPageInBookIsExplicit = false,
+                    isOpeningFromTtsNotification = false,
                     initialBookmarksJson = item.bookmarksJson,
                     isLoading = false,
                     errorMessage = null
@@ -1015,57 +1026,50 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         currentBookmarksJson: String,
         referenceWidth: Int,
         referenceHeight: Int,
+        blankPageId: String? = null,
         wasManuallyAdded: Boolean = false
-    ): PageModificationResult = withContext(Dispatchers.Default) {
+    ): PageModificationResult = withContext(Dispatchers.Default + NonCancellable) {
         Timber.d("Adding page at index $insertIndex for book $bookId (manual=$wasManuallyAdded)")
+        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+            "vm.addPage.start bookId=$bookId insertIndex=$insertIndex blankPageId=$blankPageId " +
+                "manual=$wasManuallyAdded ref=${referenceWidth}x$referenceHeight " +
+                "current=${currentLayout.pdfLayoutDebugSummary()} annotationPages=${currentAnnotations.keys.sorted()} " +
+                "bookmarksBytes=${currentBookmarksJson.length}"
+        )
 
         val newLayout = currentLayout.toMutableList()
         val safeIndex = insertIndex.coerceIn(0, newLayout.size)
 
         val newPage = VirtualPage.BlankPage(
-            id = UUID.randomUUID().toString(),
+            id = blankPageId ?: UUID.randomUUID().toString(),
             width = referenceWidth,
             height = referenceHeight,
             wasManuallyAdded = wasManuallyAdded
         )
         newLayout.add(safeIndex, newPage)
 
-        val newAnnotations = mutableMapOf<Int, List<PdfAnnotation>>()
-        currentAnnotations.forEach { (pageIdx, annots) ->
-            val newIdx = if (pageIdx >= safeIndex) pageIdx + 1 else pageIdx
-            val shiftedAnnots = annots.map { it.copy(pageIndex = newIdx) }
-            newAnnotations[newIdx] = shiftedAnnots
-        }
+        val newAnnotations = remapPdfAnnotationsForLayoutChange(
+            currentLayout = currentLayout,
+            updatedLayout = newLayout,
+            annotations = currentAnnotations
+        )
 
-        val newTotalPages = newLayout.size
         val newBookmarksJson = try {
-            if (currentBookmarksJson.isNotBlank()) {
-                val jsonArray = JSONArray(currentBookmarksJson)
-                val newArray = JSONArray()
-                for (i in 0 until jsonArray.length()) {
-                    val obj = jsonArray.getJSONObject(i)
-                    val bmPageIndex = obj.getInt("pageIndex")
-                    val title = obj.getString("title")
-
-                    val newBmPageIndex = if (bmPageIndex >= safeIndex) bmPageIndex + 1
-                    else bmPageIndex
-
-                    val newObj = JSONObject()
-                    newObj.put("pageIndex", newBmPageIndex)
-                    newObj.put("title", title)
-                    newObj.put("totalPages", newTotalPages)
-                    newArray.put(newObj)
-                }
-                newArray.toString()
-            } else {
-                "[]"
-            }
+            remapPdfBookmarksJsonForLayoutChange(
+                currentLayout = currentLayout,
+                updatedLayout = newLayout,
+                currentBookmarksJson = currentBookmarksJson
+            )
         } catch (e: Exception) {
             Timber.e(e, "Error shifting bookmarks")
             currentBookmarksJson
         }
 
         pageLayoutRepository.saveLayout(bookId, newLayout)
+        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+            "vm.addPage.done bookId=$bookId safeIndex=$safeIndex new=${newLayout.pdfLayoutDebugSummary()} " +
+                "newAnnotationPages=${newAnnotations.keys.sorted()} bookmarksBytes=${newBookmarksJson.length}"
+        )
 
         PageModificationResult(newLayout, newAnnotations, newBookmarksJson)
     }
@@ -1076,58 +1080,48 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         removeIndex: Int,
         currentAnnotations: Map<Int, List<PdfAnnotation>>,
         currentBookmarksJson: String
-    ): PageModificationResult = withContext(Dispatchers.Default) {
+    ): PageModificationResult = withContext(Dispatchers.Default + NonCancellable) {
         Timber.d("Removing page at index $removeIndex for book $bookId")
+        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+            "vm.removePage.start bookId=$bookId removeIndex=$removeIndex " +
+                "current=${currentLayout.pdfLayoutDebugSummary()} annotationPages=${currentAnnotations.keys.sorted()} " +
+                "bookmarksBytes=${currentBookmarksJson.length}"
+        )
 
         val newLayout = currentLayout.toMutableList()
         if (removeIndex in newLayout.indices) {
             newLayout.removeAt(removeIndex)
         } else {
+            Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).w(
+                "vm.removePage.ignored bookId=$bookId removeIndex=$removeIndex current=${currentLayout.pdfLayoutDebugSummary()}"
+            )
             return@withContext PageModificationResult(
                 currentLayout, currentAnnotations, currentBookmarksJson
             )
         }
 
-        val newAnnotations = mutableMapOf<Int, List<PdfAnnotation>>()
-        currentAnnotations.forEach { (pageIdx, annots) ->
-            if (pageIdx != removeIndex) {
-                val newIdx = if (pageIdx > removeIndex) pageIdx - 1 else pageIdx
-                val shiftedAnnots = annots.map { it.copy(pageIndex = newIdx) }
-                newAnnotations[newIdx] = shiftedAnnots
-            }
-        }
+        val newAnnotations = remapPdfAnnotationsForLayoutChange(
+            currentLayout = currentLayout,
+            updatedLayout = newLayout,
+            annotations = currentAnnotations
+        )
 
-        val newTotalPages = newLayout.size
         val newBookmarksJson = try {
-            if (currentBookmarksJson.isNotBlank()) {
-                val jsonArray = JSONArray(currentBookmarksJson)
-                val newArray = JSONArray()
-                for (i in 0 until jsonArray.length()) {
-                    val obj = jsonArray.getJSONObject(i)
-                    val bmPageIndex = obj.getInt("pageIndex")
-
-                    if (bmPageIndex == removeIndex) continue
-
-                    val title = obj.getString("title")
-                    val newBmPageIndex = if (bmPageIndex > removeIndex) bmPageIndex - 1
-                    else bmPageIndex
-
-                    val newObj = JSONObject()
-                    newObj.put("pageIndex", newBmPageIndex)
-                    newObj.put("title", title)
-                    newObj.put("totalPages", newTotalPages)
-                    newArray.put(newObj)
-                }
-                newArray.toString()
-            } else {
-                "[]"
-            }
+            remapPdfBookmarksJsonForLayoutChange(
+                currentLayout = currentLayout,
+                updatedLayout = newLayout,
+                currentBookmarksJson = currentBookmarksJson
+            )
         } catch (e: Exception) {
             Timber.e(e, "Error shifting bookmarks")
             currentBookmarksJson
         }
 
         pageLayoutRepository.saveLayout(bookId, newLayout)
+        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+            "vm.removePage.done bookId=$bookId removeIndex=$removeIndex new=${newLayout.pdfLayoutDebugSummary()} " +
+                "newAnnotationPages=${newAnnotations.keys.sorted()} bookmarksBytes=${newBookmarksJson.length}"
+        )
 
         PageModificationResult(newLayout, newAnnotations, newBookmarksJson)
     }
@@ -1325,7 +1319,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                                 initialCfi = null,
                                 initialBookmarksJson = item.bookmarksJson,
                                 initialHighlightsJson = null,
-                                initialPageInBook = item.lastPage
+                                initialPageInBook = item.lastPage,
+                                initialPageInBookIsExplicit = false,
+                                isOpeningFromTtsNotification = false
                             )
                         }
                     }
@@ -1360,7 +1356,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                                 initialCfi = item.lastPositionCfi,
                                 initialBookmarksJson = item.bookmarksJson,
                                 initialHighlightsJson = item.highlightsJson,
-                                initialPageInBook = null
+                                initialPageInBook = null,
+                                initialPageInBookIsExplicit = false,
+                                isOpeningFromTtsNotification = false
                             )
                         }
                     }
@@ -1652,7 +1650,12 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun deleteFont(fontId: String) {
-        viewModelScope.launch { fontsRepository.deleteFont(fontId) }
+        viewModelScope.launch {
+            fontsRepository.deleteFont(fontId)
+            if (_internalState.value.appFontPreference.referencesCustomFont(fontId)) {
+                setAppFontPreference(AppFontPreference.System)
+            }
+        }
     }
 
     fun deleteBookPermanently(bookId: String, onDeleted: () -> Unit = {}) {
@@ -1943,7 +1946,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         val sanitizedFilters = filters.copy(
             fileTypes = filters.fileTypes.filterTo(mutableSetOf()) { it in ANDROID_READABLE_FILE_TYPES }
         )
-        _internalState.update { it.withSharedLibraryAction(SharedLibraryAction.FiltersChanged(sanitizedFilters.toSharedLibraryFilters())) }
+        _internalState.update { it.withSharedLibraryAction(SharedLibraryAction.FiltersChanged(sanitizedFilters)) }
 
         prefs.edit {
             putStringSet(KEY_FILTER_FILE_TYPES, sanitizedFilters.fileTypes.map { it.name }.toSet())
@@ -2264,7 +2267,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 isLoading = false,
                 errorMessage = null,
                 initialLocator = null,
-                initialPageInBook = null
+                initialPageInBook = null,
+                initialPageInBookIsExplicit = false,
+                isOpeningFromTtsNotification = false
             )
         }
         clearPersistedReaderSession()
@@ -2351,7 +2356,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                             bookTitle = book.title,
                             chapterTitle = book.chapters.getOrNull(nextIdx)?.title,
                             coverImageUri = backgroundTtsCoverPath?.let { Uri.fromFile(File(it)).toString() },
+                            bookId = bookId,
                             chapterIndex = nextIdx,
+                            totalChapters = totalChapters,
                             ttsMode = mode,
                             playbackSource = "READER",
                             authToken = token
@@ -3476,7 +3483,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         var description: String? = bundleResult?.description
         var bookForMetadata = epubBook
 
-        if (bookForMetadata == null && bundleResult == null && (type == FileType.EPUB || type == FileType.MOBI || type == FileType.FB2 || type == FileType.MD || type == FileType.TXT || type == FileType.HTML || type == FileType.DOCX || type == FileType.ODT || type == FileType.FODT)) {
+        if (bookForMetadata == null && bundleResult == null && type in EPUB_READER_FILE_TYPES) {
             Timber.d("Parsing downloaded book for cover/metadata: $displayName")
             Timber.tag("FileOpenPerf")
                 .d("[$bookId] addFileToRecent: Starting metadata parsing (no book provided)")
@@ -3547,7 +3554,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
         val finalBookMetadata = bookForMetadata
 
-        if ((type == FileType.EPUB || type == FileType.MOBI || type == FileType.FB2 || type == FileType.MD || type == FileType.TXT || type == FileType.HTML || type == FileType.DOCX || type == FileType.ODT || type == FileType.FODT) && finalBookMetadata != null) {
+        if (type in EPUB_READER_FILE_TYPES && finalBookMetadata != null) {
             title = title ?: finalBookMetadata.title.takeIf { it.isNotBlank() && it != "content" } ?: displayName
 
             author = author ?: finalBookMetadata.author.takeIf {
@@ -3568,22 +3575,22 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
 
             if (type == FileType.PDF) {
                 try {
-                    val pdfiumCore = PdfiumCore(appContext)
                     appContext.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                        val pdfDocument = pdfiumCore.newDocument(pfd)
-                        val meta = pdfiumCore.getDocumentMeta(pdfDocument)
+                        PdfiumEngineProvider.withPdfium {
+                            PdfiumCoreProvider.core.newDocument(pfd).use { pdfDocument ->
+                                val meta = pdfDocument.getDocumentMeta()
 
-                        val extractedTitle = meta.title
-                        if (!extractedTitle.isNullOrBlank() && title == displayName) {
-                            title = extractedTitle
+                                val extractedTitle = meta.title
+                                if (!extractedTitle.isNullOrBlank() && title == displayName) {
+                                    title = extractedTitle
+                                }
+
+                                val extractedAuthor = meta.author
+                                if (!extractedAuthor.isNullOrBlank() && author == null) {
+                                    author = extractedAuthor
+                                }
+                            }
                         }
-
-                        val extractedAuthor = meta.author
-                        if (!extractedAuthor.isNullOrBlank() && author == null) {
-                            author = extractedAuthor
-                        }
-
-                        pdfiumCore.closeDocument(pdfDocument)
                     }
                 } catch (e: Exception) {
                     Timber.e(e, "Failed to extract PDF title using PdfiumCore")
@@ -3686,7 +3693,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun setSortOrder(sortOrder: SortOrder) {
-        _internalState.update { it.withSharedLibraryAction(SharedLibraryAction.SortChanged(sortOrder.toSharedSortOrder())) }
+        _internalState.update { it.withSharedLibraryAction(SharedLibraryAction.SortChanged(sortOrder)) }
         prefs.edit { putString(KEY_SORT_ORDER, sortOrder.name) }
     }
 
@@ -3814,7 +3821,11 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             _internalState.update {
                 it.copy(
                     bannerMessage = BannerMessage(
-                        message = appContext.getString(R.string.banner_importing_multiple, uris.size),
+                        message = appContext.resources.getQuantityString(
+                            R.plurals.banner_importing_books_count,
+                            uris.size,
+                            uris.size
+                        ),
                         isPersistent = true
                     ),
                     contextualActionItems = emptySet()
@@ -3866,8 +3877,12 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         unsupportedCount = unsupportedCount,
                         failedCount = failedCount
                     ),
-                    importedMessage = "Imported $importedCount books. You can find them in the Library tab.",
-                    duplicateMessage = "Those files are already in the library.",
+                    importedMessage = appContext.resources.getQuantityString(
+                        R.plurals.banner_books_imported_library_tab,
+                        importedCount,
+                        importedCount
+                    ),
+                    duplicateMessage = appContext.getString(R.string.banner_duplicate_files_already_in_library),
                     unsupportedMessage = appContext.getString(R.string.error_unsupported_file_type),
                     failedMessage = appContext.getString(R.string.error_import_file_failed)
                 )
@@ -3898,6 +3913,52 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         } else {
             Timber.i("Importing new file: $uri")
             importExternalFile(uri, isExternalIntent)
+        }
+    }
+
+    fun openTtsNotificationTarget(
+        bookId: String,
+        sourceCfi: String?,
+        startOffset: Int?,
+        chapterIndex: Int?,
+        pageIndex: Int?
+    ) {
+        viewModelScope.launch {
+            val item = recentFilesRepository.getFileByBookId(bookId)
+            if (item == null) {
+                _internalState.update {
+                    it.copy(errorMessage = appContext.getString(R.string.error_recent_item_not_found))
+                }
+                return@launch
+            }
+
+            val uri = item.getUri()
+            if (uri == null) {
+                _internalState.update {
+                    it.copy(errorMessage = appContext.getString(R.string.error_file_location_not_found))
+                }
+                return@launch
+            }
+
+            val initialLocator = chapterIndex?.let {
+                Locator(
+                    chapterIndex = it,
+                    blockIndex = 0,
+                    charOffset = startOffset ?: 0
+                )
+            }
+
+            openBook(
+                uri = uri,
+                bookId = item.bookId,
+                type = item.type,
+                originalDisplayName = item.displayName,
+                initialPageOverride = pageIndex,
+                isInitialPageExplicit = pageIndex != null,
+                initialLocatorOverride = initialLocator,
+                initialCfiOverride = sourceCfi?.takeIf { it.isNotBlank() },
+                preserveTtsOnOpen = true
+            )
         }
     }
 
@@ -4011,6 +4072,8 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         selectedBookId = bookId,
                         selectedPdfUri = uri,
                         initialPageInBook = syncPosition,
+                        initialPageInBookIsExplicit = true,
+                        isOpeningFromTtsNotification = false,
                         initialBookmarksJson = item.bookmarksJson,
                         isLoading = false
                     )
@@ -4201,7 +4264,17 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun openBook(
-        uri: Uri, bookId: String, type: FileType, originalDisplayName: String? = null, suppressNavigation: Boolean = false, bundleResult: CalibreBundleResult? = null
+        uri: Uri,
+        bookId: String,
+        type: FileType,
+        originalDisplayName: String? = null,
+        suppressNavigation: Boolean = false,
+        bundleResult: CalibreBundleResult? = null,
+        initialPageOverride: Int? = null,
+        isInitialPageExplicit: Boolean = false,
+        initialLocatorOverride: Locator? = null,
+        initialCfiOverride: String? = null,
+        preserveTtsOnOpen: Boolean = false
     ) {
         val openBookStartTime = System.currentTimeMillis()
         ReaderPerfLog.d("FileOpen start bookId=$bookId type=$type")
@@ -4270,8 +4343,11 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     selectedFileType = type,
                     isLoading = true,
                     errorMessage = null,
-                    initialLocator = null,
-                    initialPageInBook = null
+                    initialLocator = initialLocatorOverride,
+                    initialCfi = initialCfiOverride,
+                    initialPageInBook = initialPageOverride,
+                    initialPageInBookIsExplicit = isInitialPageExplicit,
+                    isOpeningFromTtsNotification = preserveTtsOnOpen
                 )
             }
 
@@ -4284,7 +4360,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     _internalState.update {
                         it.copy(
                             selectedPdfUri = uri,
-                            initialPageInBook = recentItem?.lastPage,
+                            initialPageInBook = initialPageOverride ?: recentItem?.lastPage,
+                            initialPageInBookIsExplicit = isInitialPageExplicit,
+                            isOpeningFromTtsNotification = preserveTtsOnOpen,
                             initialBookmarksJson = recentItem?.bookmarksJson,
                             isLoading = false
                         )
@@ -4308,13 +4386,13 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         Timber.tag("FileSwitch").d("PDF state updated, suppressing navigation event for smooth transition")
                     }
                 }
-            } else if (type == FileType.EPUB || type == FileType.MOBI || type == FileType.FB2 || type == FileType.MD || type == FileType.TXT || type == FileType.HTML || type == FileType.DOCX || type == FileType.ODT || type == FileType.FODT) {
+            } else if (type in EPUB_READER_FILE_TYPES) {
                 viewModelScope.launch {
                     val recentItem = recentFilesRepository.getFileByBookId(bookId)
                     Timber.tag("FileOpenPerf")
                         .d("[$bookId] Branch: ${type.name} | elapsed=${System.currentTimeMillis() - openBookStartTime}ms")
-                    val locator =
-                        if (recentItem?.lastChapterIndex != null && recentItem.locatorBlockIndex != null && recentItem.locatorCharOffset != null) {
+                    val locator = initialLocatorOverride
+                        ?: if (recentItem?.lastChapterIndex != null && recentItem.locatorBlockIndex != null && recentItem.locatorCharOffset != null) {
                             Locator(
                                 chapterIndex = recentItem.lastChapterIndex,
                                 blockIndex = recentItem.locatorBlockIndex,
@@ -4328,7 +4406,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         it.copy(
                             selectedEpubUri = uri,
                             initialLocator = locator,
-                            initialCfi = recentItem?.lastPositionCfi,
+                            initialCfi = initialCfiOverride ?: recentItem?.lastPositionCfi,
                             initialBookmarksJson = recentItem?.bookmarksJson,
                             initialHighlightsJson = recentItem?.highlightsJson,
                         )
@@ -4372,7 +4450,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                         selectedFileType = null,
                         selectedBookId = null,
                         isLoading = false,
-                        errorMessage = appContext.getString(R.string.error_unsupported_file_type)
+                        errorMessage = appContext.getString(R.string.error_unsupported_file_type),
+                        initialPageInBookIsExplicit = false,
+                        isOpeningFromTtsNotification = false
                     )
                 }
             }
@@ -5399,6 +5479,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
             if (legacyId == newId) return@withContext
             Timber.tag("FolderAnnotationSync")
                 .d("Checking migration from legacyId=$legacyId to newId=$newId")
+            Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+                "vm.migrate.check legacyId=$legacyId newId=$newId"
+            )
 
             try {
                 fun safeMigrate(legacyFile: File?, newFile: File?, tag: String) {
@@ -5430,6 +5513,95 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
 
+                fun layoutBlankScore(file: File?): Pair<Int, Int> {
+                    if (file == null || !file.exists()) return 0 to 0
+                    return try {
+                        val array = JSONArray(file.readText())
+                        var blankCount = 0
+                        var manualBlankCount = 0
+                        for (i in 0 until array.length()) {
+                            val page = array.optJSONObject(i) ?: continue
+                            if (page.optString("type") == "blank") {
+                                blankCount++
+                                if (page.optBoolean("manual", false)) manualBlankCount++
+                            }
+                        }
+                        manualBlankCount to blankCount
+                    } catch (e: Exception) {
+                        Timber.tag("FolderAnnotationSync").w(e, "Unable to score layout for migration: ${file.name}")
+                        0 to 0
+                    }
+                }
+
+                fun safeMigrateLayout(legacyFile: File?, newFile: File?) {
+                    Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+                        "vm.migrate.layout.start legacyId=$legacyId newId=$newId " +
+                            "legacyPath=${legacyFile?.absolutePath} legacyExists=${legacyFile?.exists()} " +
+                            "legacyBytes=${legacyFile?.takeIf { it.exists() }?.length() ?: 0L} " +
+                            "legacyMtime=${legacyFile?.takeIf { it.exists() }?.lastModified() ?: 0L} " +
+                            "newPath=${newFile?.absolutePath} newExists=${newFile?.exists()} " +
+                            "newBytes=${newFile?.takeIf { it.exists() }?.length() ?: 0L} " +
+                            "newMtime=${newFile?.takeIf { it.exists() }?.lastModified() ?: 0L}"
+                    )
+                    if (legacyFile == null || !legacyFile.exists()) {
+                        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+                            "vm.migrate.layout.noLegacy legacyId=$legacyId newId=$newId"
+                        )
+                        return
+                    }
+                    if (newFile == null) {
+                        Timber.tag("FolderAnnotationSync")
+                            .w("Destination file for layout is null. Skipping.")
+                        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).w(
+                            "vm.migrate.layout.noDestination legacyId=$legacyId newId=$newId"
+                        )
+                        return
+                    }
+
+                    if (newFile.exists()) {
+                        val legacyTs = legacyFile.lastModified()
+                        val newTs = newFile.lastModified()
+                        val legacyScore = layoutBlankScore(legacyFile)
+                        val newScore = layoutBlankScore(newFile)
+                        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+                            "vm.migrate.layout.compare legacyId=$legacyId newId=$newId " +
+                                "legacyScore=$legacyScore legacyTs=$legacyTs newScore=$newScore newTs=$newTs"
+                        )
+                        val shouldKeepExisting =
+                            newScore.first > legacyScore.first ||
+                                (newScore.first == legacyScore.first && newScore.second > legacyScore.second) ||
+                                (newScore == legacyScore && newTs >= legacyTs)
+
+                        if (shouldKeepExisting) {
+                            Timber.tag("FolderAnnotationSync")
+                                .i("Skipping layout migration: destination preserves newer or richer blank-page layout.")
+                            Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+                                "vm.migrate.layout.keepExisting legacyId=$legacyId newId=$newId"
+                            )
+                            legacyFile.delete()
+                            return
+                        }
+
+                        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).w(
+                            "vm.migrate.layout.replaceExisting legacyId=$legacyId newId=$newId"
+                        )
+                        newFile.delete()
+                    }
+
+                    if (legacyFile.renameTo(newFile)) {
+                        Timber.tag("FolderAnnotationSync").i("Migrated layout successfully.")
+                        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).i(
+                            "vm.migrate.layout.done legacyId=$legacyId newId=$newId " +
+                                "newExists=${newFile.exists()} newBytes=${newFile.length()} newMtime=${newFile.lastModified()}"
+                        )
+                    } else {
+                        Timber.tag("FolderAnnotationSync").w("Failed to rename layout file.")
+                        Timber.tag(PDF_BLANK_PAGE_PERSISTENCE_TAG).w(
+                            "vm.migrate.layout.renameFailed legacyId=$legacyId newId=$newId"
+                        )
+                    }
+                }
+
                 // 1. Annotations
                 safeMigrate(
                     pdfAnnotationRepository.getAnnotationFileForSync(legacyId),
@@ -5445,10 +5617,9 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
                 )
 
                 // 3. Layout
-                safeMigrate(
+                safeMigrateLayout(
                     pageLayoutRepository.getLayoutFile(legacyId),
-                    pageLayoutRepository.getLayoutFile(newId),
-                    "layout"
+                    pageLayoutRepository.getLayoutFile(newId)
                 )
 
                 // 4. Text Boxes
@@ -5616,6 +5787,11 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         _internalState.update { it.copy(useStrictFileFilter = enabled) }
     }
 
+    fun setUsePdfFileNameAsDisplayName(enabled: Boolean) {
+        prefs.edit { putBoolean(KEY_USE_PDF_FILE_NAME_AS_DISPLAY_NAME, enabled) }
+        _internalState.update { it.copy(usePdfFileNameAsDisplayName = enabled) }
+    }
+
     fun setScreenCaptureProtectionEnabled(enabled: Boolean) {
         prefs.edit { putBoolean(KEY_SCREEN_CAPTURE_PROTECTION, enabled) }
         _internalState.update { it.copy(isScreenCaptureProtectionEnabled = enabled) }
@@ -5642,13 +5818,41 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         return themes
     }
 
+    private fun loadAppFontPreference(prefs: SharedPreferences): AppFontPreference {
+        val kind = try {
+            AppFontPreferenceKind.valueOf(
+                prefs.getString(KEY_APP_FONT_KIND, AppFontPreferenceKind.SYSTEM.name)
+                    ?: AppFontPreferenceKind.SYSTEM.name
+            )
+        } catch (_: Exception) {
+            AppFontPreferenceKind.SYSTEM
+        }
+        return AppFontPreference(
+            kind = kind,
+            customFontId = prefs.getString(KEY_APP_FONT_CUSTOM_ID, null)
+        ).sanitized()
+    }
+
+    fun setAppFontPreference(preference: AppFontPreference) {
+        val sanitized = preference.sanitized()
+        _internalState.update { it.withSharedAppAction(SharedAppAction.AppFontPreferenceChanged(sanitized)) }
+        prefs.edit {
+            putString(KEY_APP_FONT_KIND, sanitized.kind.name)
+            if (sanitized.customFontId == null) {
+                remove(KEY_APP_FONT_CUSTOM_ID)
+            } else {
+                putString(KEY_APP_FONT_CUSTOM_ID, sanitized.customFontId)
+            }
+        }
+    }
+
     fun setAppThemeMode(mode: AppThemeMode) {
-        _internalState.update { it.withSharedAppAction(SharedAppAction.AppThemeChanged(mode.toSharedAppThemeMode())) }
+        _internalState.update { it.withSharedAppAction(SharedAppAction.AppThemeChanged(mode)) }
         prefs.edit { putString(KEY_APP_THEME_MODE, mode.name) }
     }
 
     fun setAppContrastOption(option: AppContrastOption) {
-        _internalState.update { it.withSharedAppAction(SharedAppAction.AppContrastChanged(option.toSharedAppContrastOption())) }
+        _internalState.update { it.withSharedAppAction(SharedAppAction.AppContrastChanged(option)) }
         prefs.edit { putString(KEY_APP_CONTRAST_OPTION, option.name) }
     }
 
@@ -5674,7 +5878,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun addCustomAppTheme(theme: CustomAppTheme) {
-        _internalState.update { it.withSharedAppAction(SharedAppAction.CustomAppThemeAdded(theme.toSharedCustomAppTheme())) }
+        _internalState.update { it.withSharedAppAction(SharedAppAction.CustomAppThemeAdded(theme)) }
         val current = _internalState.value.customAppThemes
         saveCustomAppThemes(current)
         prefs.edit { putInt(KEY_APP_SEED_COLOR, theme.seedColor.toArgb()) }
@@ -5905,6 +6109,7 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         private const val KEY_LAST_OPEN_FILE_TYPE = "last_open_file_type"
         private const val KEY_EXTERNAL_FILE_BEHAVIOR = "external_file_behavior"
         private const val KEY_USE_STRICT_FILE_FILTER = "use_strict_file_filter"
+        private const val KEY_USE_PDF_FILE_NAME_AS_DISPLAY_NAME = "use_pdf_file_name_as_display_name"
         private const val KEY_SCREEN_CAPTURE_PROTECTION = "screen_capture_protection_enabled"
         private const val KEY_APP_THEME_MODE = "app_theme_mode"
         private const val KEY_APP_CONTRAST_OPTION = "app_contrast_option"
@@ -5912,23 +6117,11 @@ open class MainViewModel(application: Application) : AndroidViewModel(applicatio
         private const val KEY_APP_TEXT_DIM_FACTOR = "app_text_dim_factor"
         private const val KEY_APP_TEXT_DIM_FACTOR_LIGHT = "app_text_dim_factor_light"
         private const val KEY_APP_TEXT_DIM_FACTOR_DARK = "app_text_dim_factor_dark"
+        private const val KEY_APP_FONT_KIND = "app_font_kind"
+        private const val KEY_APP_FONT_CUSTOM_ID = "app_font_custom_id"
         private const val KEY_CUSTOM_APP_THEMES = "custom_app_themes"
 
-        val SUPPORTED_MIME_TYPES = arrayOf(
-            "application/pdf", "application/epub+zip", "application/x-mobipocket-ebook",
-            "application/vnd.amazon.ebook", "application/vnd.amazon.mobi8-ebook", "text/markdown",
-            "text/x-markdown", "text/plain", "text/html", "application/xhtml+xml",
-            "application/x-fictionbook+xml", "application/x-zip-compressed-fb2", "application/zip",
-            "application/vnd.comicbook+zip", "application/x-cbz", "application/vnd.comicbook-rar",
-            "application/x-cbr", "application/x-rar-compressed", "application/x-cb7",
-            "application/x-7z-compressed", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            "application/vnd.oasis.opendocument.text", "application/x-vnd.oasis.opendocument.text-flat-xml",
-            "text/csv", "text/comma-separated-values", "text/tab-separated-values", "application/json",
-            "application/xml", "text/xml", "text/x-java-source", "text/x-python", "text/x-kotlin",
-            "text/javascript", "application/javascript", "text/x-c", "text/x-c++",
-            "text/x-csharp", "text/x-ruby", "text/x-go", "text/x-log"
-        )
+        val SUPPORTED_MIME_TYPES = SharedFileCapabilities.androidFilePickerMimeTypes.toTypedArray()
     }
 }
 

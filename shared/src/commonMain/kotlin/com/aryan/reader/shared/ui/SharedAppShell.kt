@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.Button
@@ -77,6 +78,7 @@ enum class SharedAppTab {
     CATALOGS,
     READER,
     SETTINGS,
+    PRO,
     CUSTOM_FONTS,
     SUPPORT,
     FEEDBACK,
@@ -140,14 +142,14 @@ fun SharedAppShell(
                             selectedTab = shellModel.selectedPrimaryTab,
                             primaryTabs = shellModel.primaryTabs,
                             onTabSelected = onTabSelected,
-                            onToolsClick = { onTabSelected(SharedAppTab.SETTINGS) }
+                            onToolsClick = { showToolsPanel = true }
                         )
                     } else {
                         SharedAppCompactRail(
                             selectedTab = shellModel.selectedPrimaryTab,
                             primaryTabs = shellModel.primaryTabs,
                             onTabSelected = onTabSelected,
-                            onToolsClick = { onTabSelected(SharedAppTab.SETTINGS) }
+                            onToolsClick = { showToolsPanel = true }
                         )
                     }
                 }
@@ -242,20 +244,20 @@ private fun SharedAppSidebar(
 ) {
     Surface(
         modifier = Modifier
-            .width(244.dp)
+            .width(SharedUiTokens.sidebarWidth)
             .fillMaxHeight(),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        tonalElevation = 0.dp
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(SharedUiTokens.compactGap)
         ) {
             Column(Modifier.padding(horizontal = 10.dp, vertical = 12.dp)) {
-                Text("Episteme", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("Desktop library", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(readerString("app_name", "Episteme"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(readerString("desktop_library_and_reader", "Library and reader"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             primaryTabs.forEach { tab ->
                 SharedSidebarNavItem(
@@ -267,7 +269,7 @@ private fun SharedAppSidebar(
             Spacer(Modifier.weight(1f))
             HorizontalDivider()
             SharedSidebarButton(
-                label = "Settings",
+                label = readerString("desktop_tools", "Tools"),
                 icon = Icons.Default.Settings,
                 onClick = onToolsClick
             )
@@ -282,18 +284,18 @@ private fun SharedAppCompactRail(
     onTabSelected: (SharedAppTab) -> Unit,
     onToolsClick: () -> Unit
 ) {
-    NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
+    NavigationRail(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         primaryTabs.forEach { tab ->
             NavigationRailItem(
                 selected = selectedTab == tab,
                 onClick = { onTabSelected(tab) },
                 icon = { Icon(tab.icon, contentDescription = null) },
-                label = { Text(tab.label) }
+                label = { Text(tab.localizedLabel()) }
             )
         }
         Spacer(Modifier.weight(1f))
         IconButton(onClick = onToolsClick) {
-            Icon(Icons.Default.Settings, contentDescription = "Settings")
+            Icon(Icons.Default.Settings, contentDescription = readerString("desktop_tools", "Tools"))
         }
     }
 }
@@ -327,7 +329,7 @@ private fun SharedSidebarNavItem(
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Icon(tab.icon, contentDescription = null, modifier = Modifier.size(21.dp))
-            Text(tab.label, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+            Text(tab.localizedLabel(), style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
         }
     }
 }
@@ -371,10 +373,14 @@ private fun SharedToolsPanel(
     onOpenTab: (SharedAppTab) -> Unit,
     onTabsEnabledChange: (Boolean) -> Unit
 ) {
+    val hasWorkspaceActions = SharedAppToolAction.SETTINGS in toolActions ||
+        SharedAppToolAction.APP_THEME in toolActions ||
+        SharedAppToolAction.TABS_TOGGLE in toolActions
     val hasLibraryActions = SharedAppToolAction.IMPORT_FILES in toolActions ||
         SharedAppToolAction.IMPORT_FOLDER in toolActions ||
         SharedAppToolAction.SYNC in toolActions
-    val hasSettingsActions = SharedAppToolAction.AI_SETTINGS in toolActions ||
+    val hasSettingsActions = SharedAppToolAction.PRO in toolActions ||
+        SharedAppToolAction.AI_SETTINGS in toolActions ||
         SharedAppToolAction.CUSTOM_FONTS in toolActions
     val hasProjectActions = SharedAppToolAction.HELP_FEEDBACK in toolActions ||
         SharedAppToolAction.SUPPORT in toolActions ||
@@ -395,29 +401,65 @@ private fun SharedToolsPanel(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Tools", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("Import, sync, and app settings", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(readerString("desktop_tools", "Tools"), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Text(readerString("desktop_tools_desc", "Import, sync, and app settings"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton(onClick = onClose) {
-                    Icon(Icons.Default.Close, contentDescription = "Close tools")
+                    Icon(Icons.Default.Close, contentDescription = readerString("desktop_close_tools", "Close tools"))
+                }
+            }
+
+            if (hasWorkspaceActions) {
+                SharedToolsSection(readerString("desktop_workspace", "Workspace")) {
+                    if (SharedAppToolAction.SETTINGS in toolActions) {
+                        SharedToolRow(Icons.Default.Settings, readerString("desktop_settings_hub", "Settings hub")) { onOpenTab(SharedAppTab.SETTINGS) }
+                    }
+                    if (SharedAppToolAction.APP_THEME in toolActions) {
+                        SharedToolRow(
+                            icon = Icons.Default.Palette,
+                            title = readerString("app_theme_title", "App theme"),
+                            onClick = onAppThemeRequested
+                        )
+                    }
+                    if (SharedAppToolAction.TABS_TOGGLE in toolActions) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 2.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(readerString("desktop_open_readers", "Open readers"), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                Text(
+                                    if (isTabsEnabled) readerString("content_desc_enabled", "Enabled") else readerString("desktop_disabled", "Disabled"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = isTabsEnabled,
+                                onCheckedChange = onTabsEnabledChange
+                            )
+                        }
+                    }
                 }
             }
 
             if (hasLibraryActions) {
-                SharedToolsSection("Library") {
+                SharedToolsSection(readerString("library_title", "Library")) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                         if (SharedAppToolAction.IMPORT_FILES in toolActions) {
                             Button(onClick = onImportFiles, modifier = Modifier.weight(1f)) {
                                 Icon(Icons.Default.ImportExport, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("Import files")
+                                Text(readerString("desktop_import_files", "Import files"))
                             }
                         }
                         if (SharedAppToolAction.IMPORT_FOLDER in toolActions) {
                             OutlinedButton(onClick = onImportFolder, modifier = Modifier.weight(1f)) {
                                 Icon(Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("Add folder")
+                                Text(readerString("fab_add_folder", "Add folder"))
                             }
                         }
                     }
@@ -426,11 +468,11 @@ private fun SharedToolsPanel(
                             FilledTonalButton(onClick = onSyncRequested, modifier = Modifier.fillMaxWidth()) {
                                 Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("Sync folders")
+                                Text(readerString("desktop_sync_folders", "Sync folders"))
                             }
                         } else {
-                            SharedToolRow(Icons.Default.Sync, "Sync metadata", onFolderMetadataSyncRequested)
-                            SharedToolRow(Icons.Default.Search, "Full scan") {
+                            SharedToolRow(Icons.Default.Sync, readerString("desktop_sync_metadata", "Sync metadata"), onFolderMetadataSyncRequested)
+                            SharedToolRow(Icons.Default.Search, readerString("desktop_full_scan", "Full scan")) {
                                 onSyncRequested()
                             }
                         }
@@ -438,54 +480,30 @@ private fun SharedToolsPanel(
                 }
             }
 
-            SharedToolsSection("Appearance") {
-                if (SharedAppToolAction.APP_THEME in toolActions) {
-                    SharedToolRow(
-                        icon = Icons.Default.Palette,
-                        title = "App theme",
-                        onClick = onAppThemeRequested
-                    )
-                }
-                if (SharedAppToolAction.TABS_TOGGLE in toolActions) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 2.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Active reader tabs", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                            Text(if (isTabsEnabled) "Enabled" else "Disabled", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = isTabsEnabled,
-                            onCheckedChange = onTabsEnabledChange
-                        )
-                    }
-                }
-            }
-
             if (hasSettingsActions) {
-                SharedToolsSection("Settings") {
+                SharedToolsSection(readerString("settings", "Settings")) {
+                    if (SharedAppToolAction.PRO in toolActions) {
+                        SharedToolRow(Icons.Default.Star, readerString("desktop_pro_and_credits", "Pro and credits")) { onOpenTab(SharedAppTab.PRO) }
+                    }
                     if (SharedAppToolAction.AI_SETTINGS in toolActions) {
-                        SharedToolRow(Icons.Default.Settings, "AI keys and models", onAiSettingsRequested)
+                        SharedToolRow(Icons.Default.Settings, readerString("ai_settings_title", "AI keys and models"), onAiSettingsRequested)
                     }
                     if (SharedAppToolAction.CUSTOM_FONTS in toolActions) {
-                        SharedToolRow(Icons.Default.TextFields, "Custom fonts") { onOpenTab(SharedAppTab.CUSTOM_FONTS) }
+                        SharedToolRow(Icons.Default.TextFields, readerString("custom_fonts", "Custom fonts")) { onOpenTab(SharedAppTab.CUSTOM_FONTS) }
                     }
                 }
             }
 
             if (hasProjectActions) {
-                SharedToolsSection("Project") {
+                SharedToolsSection(readerString("desktop_project", "Project")) {
                     if (SharedAppToolAction.HELP_FEEDBACK in toolActions) {
-                        SharedToolRow(Icons.Default.Feedback, "Help & feedback") { onOpenTab(SharedAppTab.FEEDBACK) }
+                        SharedToolRow(Icons.Default.Feedback, readerString("drawer_help_feedback", "Help & feedback")) { onOpenTab(SharedAppTab.FEEDBACK) }
                     }
                     if (SharedAppToolAction.SUPPORT in toolActions) {
-                        SharedToolRow(Icons.Default.Favorite, "Support project") { onOpenTab(SharedAppTab.SUPPORT) }
+                        SharedToolRow(Icons.Default.Favorite, readerString("drawer_support_project", "Support project")) { onOpenTab(SharedAppTab.SUPPORT) }
                     }
                     if (SharedAppToolAction.ABOUT in toolActions) {
-                        SharedToolRow(Icons.Default.Info, "About Episteme") { onOpenTab(SharedAppTab.ABOUT) }
+                        SharedToolRow(Icons.Default.Info, readerString("about_title", "About Episteme")) { onOpenTab(SharedAppTab.ABOUT) }
                     }
                 }
             }
@@ -529,19 +547,22 @@ private fun SharedToolRow(
     }
 }
 
-private val SharedAppTab.label: String
-    get() = when (this) {
-        SharedAppTab.HOME -> "Home"
-        SharedAppTab.LIBRARY -> "Library"
-        SharedAppTab.SHELVES -> "Shelves"
-        SharedAppTab.CATALOGS -> "OPDS"
-        SharedAppTab.READER -> "Reader"
-        SharedAppTab.SETTINGS -> "Settings"
-        SharedAppTab.CUSTOM_FONTS -> "Custom fonts"
-        SharedAppTab.SUPPORT -> "Support"
-        SharedAppTab.FEEDBACK -> "Feedback"
-        SharedAppTab.ABOUT -> "About"
+@Composable
+private fun SharedAppTab.localizedLabel(): String {
+    return when (this) {
+        SharedAppTab.HOME -> readerString("nav_home", "Home")
+        SharedAppTab.LIBRARY -> readerString("library_title", "Library")
+        SharedAppTab.SHELVES -> readerString("tab_shelves", "Shelves")
+        SharedAppTab.CATALOGS -> readerString("opds_stream", "OPDS")
+        SharedAppTab.READER -> readerString("desktop_reader", "Reader")
+        SharedAppTab.SETTINGS -> readerString("settings", "Settings")
+        SharedAppTab.PRO -> readerString("desktop_pro", "Pro")
+        SharedAppTab.CUSTOM_FONTS -> readerString("custom_fonts", "Custom fonts")
+        SharedAppTab.SUPPORT -> readerString("desktop_support", "Support")
+        SharedAppTab.FEEDBACK -> readerString("desktop_feedback", "Feedback")
+        SharedAppTab.ABOUT -> readerString("desktop_about", "About")
     }
+}
 
 private val SharedAppTab.icon: ImageVector
     get() = when (this) {
@@ -551,6 +572,7 @@ private val SharedAppTab.icon: ImageVector
         SharedAppTab.CATALOGS -> Icons.Default.Cloud
         SharedAppTab.READER -> Icons.AutoMirrored.Filled.MenuBook
         SharedAppTab.SETTINGS -> Icons.Default.Settings
+        SharedAppTab.PRO -> Icons.Default.Star
         SharedAppTab.CUSTOM_FONTS -> Icons.Default.TextFields
         SharedAppTab.SUPPORT -> Icons.Default.Favorite
         SharedAppTab.FEEDBACK -> Icons.Default.Feedback

@@ -33,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
@@ -72,6 +73,8 @@ import androidx.compose.ui.window.DialogProperties
 import com.aryan.reader.R
 import com.aryan.reader.epubreader.OptionSegmentedControl
 import com.aryan.reader.epubreader.SystemUiMode
+import com.aryan.reader.epubreader.titleRes
+import com.aryan.reader.shared.reader.ReaderPageSpreadMode
 
 
 enum class PdfFlatItemType { SECTION_HEADER, TOOL, EMPTY_PLACEHOLDER, MORE_HEADER, MORE_TOOL }
@@ -114,7 +117,7 @@ fun sanitizePdfPlaceholders(list: List<PdfFlatToolItem>): List<PdfFlatToolItem> 
 }
 
 private val pdfReorderableToolbarTools = setOf(
-    PdfReaderTool.DICTIONARY, PdfReaderTool.THEME, PdfReaderTool.LOCK_PANNING,
+    PdfReaderTool.DICTIONARY, PdfReaderTool.THEME, PdfReaderTool.BRIGHTNESS, PdfReaderTool.LOCK_PANNING,
     PdfReaderTool.SLIDER, PdfReaderTool.TOC, PdfReaderTool.SEARCH,
     PdfReaderTool.HIGHLIGHT_ALL, PdfReaderTool.AI_FEATURES,
     PdfReaderTool.EDIT_MODE, PdfReaderTool.TTS_CONTROLS,
@@ -126,11 +129,12 @@ internal fun buildPdfToolbarItems(
     toolOrder: List<PdfReaderTool>,
     bottomTools: Set<String>
 ): List<PdfFlatToolItem> {
-    val toolbarTools = toolOrder.filter { it in pdfReorderableToolbarTools }
+    val availableToolOrder = toolOrder.filter(::isPdfReaderToolAvailable)
+    val toolbarTools = availableToolOrder.filter { it in pdfReorderableToolbarTools }
     val topTools = toolbarTools.filter { !bottomTools.contains(it.name) && !hiddenTools.contains(it.name) }
     val bottomToolsList = toolbarTools.filter { bottomTools.contains(it.name) && !hiddenTools.contains(it.name) }
     val hiddenToolsList = toolbarTools.filter { hiddenTools.contains(it.name) }
-    val moreTools = toolOrder.filter { it !in pdfReorderableToolbarTools }
+    val moreTools = availableToolOrder.filter { it !in pdfReorderableToolbarTools }
 
     val list = mutableListOf<PdfFlatToolItem>()
 
@@ -541,7 +545,9 @@ private fun PdfToolPreviewIcon(tool: PdfReaderTool) {
     when (tool) {
         PdfReaderTool.DICTIONARY -> Icon(painterResource(id = R.drawable.dictionary), contentDescription = title, modifier = Modifier.size(20.dp))
         PdfReaderTool.THEME -> Icon(painterResource(id = R.drawable.palette), contentDescription = title, modifier = Modifier.size(20.dp))
+        PdfReaderTool.BRIGHTNESS -> Icon(painterResource(id = R.drawable.contrast), contentDescription = title, modifier = Modifier.size(20.dp))
         PdfReaderTool.LOCK_PANNING -> Icon(Icons.Default.LockOpen, contentDescription = title, modifier = Modifier.size(20.dp))
+        PdfReaderTool.FILE_INFO -> Icon(Icons.Default.Info, contentDescription = title, modifier = Modifier.size(20.dp))
         PdfReaderTool.SLIDER -> Icon(painterResource(id = R.drawable.slider), contentDescription = title, modifier = Modifier.size(20.dp))
         PdfReaderTool.TOC -> Icon(Icons.Default.Menu, contentDescription = title, modifier = Modifier.size(20.dp))
         PdfReaderTool.SEARCH -> Icon(Icons.Default.Search, contentDescription = title, modifier = Modifier.size(20.dp))
@@ -556,9 +562,14 @@ private fun PdfToolPreviewIcon(tool: PdfReaderTool) {
 
 @Composable
 fun PdfVisualOptionsSheet(
+    displayMode: DisplayMode,
     systemUiMode: SystemUiMode,
+    pageSpreadMode: ReaderPageSpreadMode,
+    firstPageStandaloneInSpread: Boolean,
     showVerticalPageGap: Boolean,
     showPageNumberOverlay: Boolean,
+    onPageSpreadModeChange: (ReaderPageSpreadMode) -> Unit,
+    onFirstPageStandaloneInSpreadChange: (Boolean) -> Unit,
     onSystemUiModeChange: (SystemUiMode) -> Unit,
     onShowVerticalPageGapChange: (Boolean) -> Unit,
     onShowPageNumberOverlayChange: (Boolean) -> Unit,
@@ -606,6 +617,35 @@ fun PdfVisualOptionsSheet(
 
             Text(stringResource(R.string.visual_options_page_layout), style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(4.dp))
+            if (displayMode == DisplayMode.PAGINATION) {
+                Text(
+                    stringResource(R.string.visual_options_pdf_page_spread),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OptionSegmentedControl(
+                    options = ReaderPageSpreadMode.entries,
+                    selectedOption = pageSpreadMode,
+                    onOptionSelected = onPageSpreadModeChange,
+                    getLabel = {
+                        when (it) {
+                            ReaderPageSpreadMode.SINGLE -> stringResource(R.string.visual_options_pdf_spread_single)
+                            ReaderPageSpreadMode.TWO_PAGE -> stringResource(R.string.visual_options_pdf_spread_two)
+                        }
+                    }
+                )
+                if (pageSpreadMode == ReaderPageSpreadMode.TWO_PAGE) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    PdfVisualOptionSwitchRow(
+                        title = stringResource(R.string.visual_options_pdf_first_page_alone),
+                        description = stringResource(R.string.visual_options_pdf_first_page_alone_desc),
+                        checked = firstPageStandaloneInSpread,
+                        onCheckedChange = onFirstPageStandaloneInSpreadChange
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
             PdfVisualOptionSwitchRow(
                 title = stringResource(R.string.visual_options_remove_page_gap),
                 description = stringResource(R.string.visual_options_remove_page_gap_desc),

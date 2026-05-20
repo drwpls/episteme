@@ -12,6 +12,8 @@ typealias BannerMessage = com.aryan.reader.shared.BannerMessage
 typealias UserData = com.aryan.reader.shared.UserData
 typealias AppThemeMode = com.aryan.reader.shared.AppThemeMode
 typealias AppContrastOption = com.aryan.reader.shared.AppContrastOption
+typealias AppFontPreference = com.aryan.reader.shared.AppFontPreference
+typealias AppFontPreferenceKind = com.aryan.reader.shared.AppFontPreferenceKind
 typealias CustomAppTheme = com.aryan.reader.shared.CustomAppTheme
 
 data class ImportResult(
@@ -50,6 +52,8 @@ data class ReaderScreenState(
     val initialBookmarksJson: String? = null,
     val initialHighlightsJson: String? = null,
     val initialPageInBook: Int? = null,
+    val initialPageInBookIsExplicit: Boolean = false,
+    val isOpeningFromTtsNotification: Boolean = false,
     val shelves: List<Shelf> = emptyList(),
     val viewingShelfId: String? = null,
     val isAddingBooksToShelf: Boolean = false,
@@ -95,11 +99,13 @@ data class ReaderScreenState(
     val showExternalFileSavePromptFor: String? = null,
     val externalFileBehavior: String = "ASK",
     val useStrictFileFilter: Boolean = false,
+    val usePdfFileNameAsDisplayName: Boolean = false,
     val appThemeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val appContrastOption: AppContrastOption = AppContrastOption.STANDARD,
     val appTextDimFactorLight: Float = 1.0f,
     val appTextDimFactorDark: Float = 1.0f,
     val appSeedColor: androidx.compose.ui.graphics.Color? = null,
+    val appFontPreference: AppFontPreference = AppFontPreference.System,
     val customAppThemes: List<CustomAppTheme> = emptyList(),
     val allTags: List<TagEntity> = emptyList(),
     val showTagSelectionDialogFor: Set<String> = emptySet(),

@@ -2,6 +2,8 @@ package com.aryan.reader.pdf
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import com.aryan.reader.BuildConfig
+import com.aryan.reader.FileType
 import com.aryan.reader.pdf.data.AnnotationSettingsRepository
 import com.aryan.reader.pdf.data.AnnotationToolSettings
 import com.aryan.reader.pdf.data.TextStyleConfig
@@ -16,6 +18,7 @@ import com.aryan.reader.shared.pdf.SharedPdfAnnotationDefaults
 import com.aryan.reader.shared.pdf.SharedPdfAnnotationSerializer
 import com.aryan.reader.shared.pdf.SharedPdfHighlighterPalette
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -164,12 +167,18 @@ class PdfReaderSettingsAndSharedModelsTest {
     @Test
     fun `pdf toolbar reset defaults match first-run toolbar defaults`() {
         assertEquals(
-            setOf(PdfReaderTool.SCREEN_ORIENTATION.name, PdfReaderTool.HIGHLIGHT_ALL.name),
+            setOf(
+                PdfReaderTool.SCREEN_ORIENTATION.name,
+                PdfReaderTool.HIGHLIGHT_ALL.name,
+                PdfReaderTool.BRIGHTNESS.name
+            ),
             defaultPdfHiddenTools()
         )
-        assertEquals(PdfReaderTool.entries.toList(), defaultPdfToolOrder())
+        val expectedToolOrder = PdfReaderTool.entries.filter(::isPdfReaderToolAvailable)
+
+        assertEquals(expectedToolOrder, defaultPdfToolOrder())
         assertEquals(
-            PdfReaderTool.entries.filter { it.category == "Bottom Bar" }.map { it.name }.toSet(),
+            expectedToolOrder.filter { it.category == "Bottom Bar" }.map { it.name }.toSet(),
             defaultPdfBottomTools()
         )
 
@@ -188,8 +197,106 @@ class PdfReaderSettingsAndSharedModelsTest {
             defaultItems.single { it.tool == PdfReaderTool.HIGHLIGHT_ALL }.section
         )
         assertEquals(
+            PdfToolbarSection.HIDDEN,
+            defaultItems.single { it.tool == PdfReaderTool.BRIGHTNESS }.section
+        )
+        assertEquals(
             PdfToolbarSection.BOTTOM,
             defaultItems.single { it.tool == PdfReaderTool.SLIDER }.section
         )
+        val expectedMoreTools = buildSet {
+            addAll(
+                setOf(
+                    PdfReaderTool.FILE_INFO,
+                    PdfReaderTool.VISUAL_OPTIONS,
+                    PdfReaderTool.TAP_TO_TURN,
+                    PdfReaderTool.READING_MODE,
+                    PdfReaderTool.KEEP_SCREEN_ON,
+                    PdfReaderTool.AUTO_SCROLL,
+                    PdfReaderTool.TTS_SETTINGS,
+                    PdfReaderTool.TTS_REPLACEMENTS,
+                    PdfReaderTool.BOOKMARK,
+                    PdfReaderTool.PAGE_MANAGEMENT,
+                    PdfReaderTool.REFLOW,
+                    PdfReaderTool.SHARE,
+                    PdfReaderTool.SAVE_COPY,
+                    PdfReaderTool.PRINT
+                )
+            )
+            if (BuildConfig.IS_PRO) add(PdfReaderTool.OCR_LANGUAGE)
+        }
+
+        assertEquals(
+            expectedMoreTools,
+            defaultItems
+                .filter { it.type == PdfFlatItemType.MORE_TOOL }
+                .mapNotNull { it.tool }
+                .toSet()
+        )
+        assertFalse(defaultItems.any { it.tool?.name == "FULL_SCREEN" })
+        if (!BuildConfig.IS_PRO) {
+            assertFalse(defaultItems.any { it.tool == PdfReaderTool.OCR_LANGUAGE })
+        }
+    }
+
+    @Test
+    fun `pdf overflow sections end at reflow when all file actions are hidden`() {
+        val sections = pdfOverflowMenuSections(
+            hiddenTools = setOf(
+                PdfReaderTool.SHARE.name,
+                PdfReaderTool.SAVE_COPY.name,
+                PdfReaderTool.PRINT.name
+            ),
+            hasHiddenToolbarTools = false,
+            isPro = false,
+            effectiveFileType = FileType.PDF,
+            hasFileInfo = false
+        )
+
+        assertEquals(PdfOverflowMenuSection.REFLOW, sections.last())
+        assertTrue(PdfOverflowMenuSection.FILE_ACTIONS !in sections)
+    }
+
+    @Test
+    fun `pdf overflow sections keep file actions when only print is hidden`() {
+        val sections = pdfOverflowMenuSections(
+            hiddenTools = setOf(PdfReaderTool.PRINT.name),
+            hasHiddenToolbarTools = false,
+            isPro = false,
+            effectiveFileType = FileType.PDF,
+            hasFileInfo = false
+        )
+
+        assertEquals(PdfOverflowMenuSection.FILE_ACTIONS, sections.last())
+    }
+
+    @Test
+    fun `pdf overflow sections expose file info only when available and visible`() {
+        val visibleSections = pdfOverflowMenuSections(
+            hiddenTools = emptySet(),
+            hasHiddenToolbarTools = false,
+            isPro = false,
+            effectiveFileType = FileType.PDF,
+            hasFileInfo = true
+        )
+        val missingItemSections = pdfOverflowMenuSections(
+            hiddenTools = emptySet(),
+            hasHiddenToolbarTools = false,
+            isPro = false,
+            effectiveFileType = FileType.PDF,
+            hasFileInfo = false
+        )
+        val hiddenSections = pdfOverflowMenuSections(
+            hiddenTools = setOf(PdfReaderTool.FILE_INFO.name),
+            hasHiddenToolbarTools = false,
+            isPro = false,
+            effectiveFileType = FileType.PDF,
+            hasFileInfo = true
+        )
+
+        assertTrue(PdfOverflowMenuSection.FILE_INFO in visibleSections)
+        assertEquals(PdfOverflowMenuSection.FILE_INFO, visibleSections.last())
+        assertFalse(PdfOverflowMenuSection.FILE_INFO in missingItemSections)
+        assertFalse(PdfOverflowMenuSection.FILE_INFO in hiddenSections)
     }
 }

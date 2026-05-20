@@ -43,6 +43,7 @@ data class SharedLibrarySnapshot(
     val appTextDimFactorLight: Float = 1.0f,
     val appTextDimFactorDark: Float = 1.0f,
     val appSeedColor: Color? = null,
+    val appFontPreference: AppFontPreference = AppFontPreference.System,
     val customAppThemes: List<CustomAppTheme> = emptyList(),
     val readerDefaultSettings: ReaderSettings = ReaderSettings(),
     val pdfReaderDefaultSettings: ReaderSettings = ReaderSettings(themeId = "no_theme"),
@@ -53,7 +54,7 @@ data class SharedLibrarySnapshot(
 )
 
 object SharedLibrarySnapshotJson {
-    private const val SCHEMA_VERSION = 19
+    private const val SCHEMA_VERSION = 20
 
     private val json = Json {
         prettyPrint = true
@@ -100,6 +101,10 @@ object SharedLibrarySnapshotJson {
                 ?: root.float("appTextDimFactor")
                 ?: 1.0f,
             appSeedColor = root.int("appSeedColor")?.let { Color(it) },
+            appFontPreference = root["appFontPreference"]
+                ?.takeUnless { it is JsonNull }
+                ?.asAppFontPreferenceOrNull()
+                ?: AppFontPreference.System,
             customAppThemes = root.array("customAppThemes").mapNotNull { it.asCustomAppThemeOrNull() },
             readerDefaultSettings = readerDefaultSettings.migrateLegacyDefaultReadingMode(schemaVersion),
             pdfReaderDefaultSettings = root["pdfReaderDefaultSettings"]
@@ -147,6 +152,7 @@ object SharedLibrarySnapshotJson {
                 "appTextDimFactorLight" to JsonPrimitive(snapshot.appTextDimFactorLight),
                 "appTextDimFactorDark" to JsonPrimitive(snapshot.appTextDimFactorDark),
                 "appSeedColor" to snapshot.appSeedColor.asJson(),
+                "appFontPreference" to snapshot.appFontPreference.sanitized().toJsonObject(),
                 "customAppThemes" to JsonArray(snapshot.customAppThemes.map { it.toJsonObject() }),
                 "readerDefaultSettings" to snapshot.readerDefaultSettings.asJson(),
                 "pdfReaderDefaultSettings" to snapshot.pdfReaderDefaultSettings.asJson(),
@@ -343,6 +349,17 @@ private fun JsonElement.asCustomAppThemeOrNull(): CustomAppTheme? {
     )
 }
 
+private fun JsonElement.asAppFontPreferenceOrNull(): AppFontPreference? {
+    val obj = runCatching { jsonObject }.getOrNull() ?: return null
+    val kind = obj.string("kind")
+        ?.let { runCatching { AppFontPreferenceKind.valueOf(it) }.getOrNull() }
+        ?: return null
+    return AppFontPreference(
+        kind = kind,
+        customFontId = obj.string("customFontId")
+    ).sanitized()
+}
+
 private fun BookItem.toJsonObject(): JsonObject {
     return JsonObject(
         mapOf(
@@ -449,6 +466,16 @@ private fun CustomAppTheme.toJsonObject(): JsonObject {
     )
 }
 
+private fun AppFontPreference.toJsonObject(): JsonObject {
+    val sanitized = sanitized()
+    return JsonObject(
+        mapOf(
+            "kind" to JsonPrimitive(sanitized.kind.name),
+            "customFontId" to sanitized.customFontId.asJson()
+        )
+    )
+}
+
 private fun String?.asJson(): JsonElement = this?.let { JsonPrimitive(it) } ?: JsonNull
 private fun Float?.asJson(): JsonElement = this?.let { JsonPrimitive(it) } ?: JsonNull
 private fun Double?.asJson(): JsonElement = this?.let { JsonPrimitive(it) } ?: JsonNull
@@ -509,6 +536,10 @@ private fun JsonElement.asReaderSettingsOrNull(): ReaderSettings? {
         pdfPageNumberOverlayVisible = obj.boolean(
             "pdfPageNumberOverlayVisible",
             defaults.pdfPageNumberOverlayVisible
+        ),
+        pdfFirstPageStandaloneInSpread = obj.boolean(
+            "pdfFirstPageStandaloneInSpread",
+            defaults.pdfFirstPageStandaloneInSpread
         ),
         seamlessChapterNavigation = obj.boolean("seamlessChapterNavigation", defaults.seamlessChapterNavigation),
         chapterTurnDragMultiplier = obj.float("chapterTurnDragMultiplier") ?: defaults.chapterTurnDragMultiplier
@@ -652,6 +683,7 @@ private fun ReaderSettings?.asJson(): JsonElement {
             "pageSpreadMode" to JsonPrimitive(settings.pageSpreadMode.name),
             "pdfVerticalPageGapVisible" to JsonPrimitive(settings.pdfVerticalPageGapVisible),
             "pdfPageNumberOverlayVisible" to JsonPrimitive(settings.pdfPageNumberOverlayVisible),
+            "pdfFirstPageStandaloneInSpread" to JsonPrimitive(settings.pdfFirstPageStandaloneInSpread),
             "seamlessChapterNavigation" to JsonPrimitive(settings.seamlessChapterNavigation),
             "chapterTurnDragMultiplier" to JsonPrimitive(settings.chapterTurnDragMultiplier)
         )

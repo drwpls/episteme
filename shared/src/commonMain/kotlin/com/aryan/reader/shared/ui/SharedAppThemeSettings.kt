@@ -67,6 +67,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
@@ -170,6 +171,7 @@ fun SharedAppTheme(
     appTextDimFactorLight: Float,
     appTextDimFactorDark: Float,
     appSeedColor: Color?,
+    appFontFamily: FontFamily? = null,
     content: @Composable () -> Unit
 ) {
     val darkTheme = resolveSharedAppDarkTheme(appThemeMode, isSystemInDarkTheme())
@@ -185,8 +187,28 @@ fun SharedAppTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography(),
+        typography = appFontFamily?.let { Typography().withAppFontFamily(it) } ?: Typography(),
         content = content
+    )
+}
+
+fun Typography.withAppFontFamily(fontFamily: FontFamily): Typography {
+    return copy(
+        displayLarge = displayLarge.copy(fontFamily = fontFamily),
+        displayMedium = displayMedium.copy(fontFamily = fontFamily),
+        displaySmall = displaySmall.copy(fontFamily = fontFamily),
+        headlineLarge = headlineLarge.copy(fontFamily = fontFamily),
+        headlineMedium = headlineMedium.copy(fontFamily = fontFamily),
+        headlineSmall = headlineSmall.copy(fontFamily = fontFamily),
+        titleLarge = titleLarge.copy(fontFamily = fontFamily),
+        titleMedium = titleMedium.copy(fontFamily = fontFamily),
+        titleSmall = titleSmall.copy(fontFamily = fontFamily),
+        bodyLarge = bodyLarge.copy(fontFamily = fontFamily),
+        bodyMedium = bodyMedium.copy(fontFamily = fontFamily),
+        bodySmall = bodySmall.copy(fontFamily = fontFamily),
+        labelLarge = labelLarge.copy(fontFamily = fontFamily),
+        labelMedium = labelMedium.copy(fontFamily = fontFamily),
+        labelSmall = labelSmall.copy(fontFamily = fontFamily)
     )
 }
 
@@ -246,10 +268,11 @@ fun SharedAppThemeSettingsDialog(
     onDismiss: () -> Unit
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
+    val defaultCustomThemeName = readerString("desktop_custom_theme_default", "Custom")
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("App theme", fontWeight = FontWeight.Bold) },
+        title = { Text(readerString("app_theme_title", "App theme"), fontWeight = FontWeight.Bold) },
         text = {
             Column(
                 modifier = Modifier
@@ -258,42 +281,42 @@ fun SharedAppThemeSettingsDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                SettingsLabel("Appearance")
+                SettingsLabel(readerString("app_theme_appearance", "Appearance"))
                 SegmentedControl(
                     values = AppThemeMode.entries,
                     selectedValue = appThemeMode,
-                    label = { it.label },
+                    label = { it.localizedLabel() },
                     onValueSelected = onThemeModeChanged
                 )
 
-                SettingsLabel("Contrast")
+                SettingsLabel(readerString("app_theme_contrast", "Contrast"))
                 SegmentedControl(
                     values = AppContrastOption.entries,
                     selectedValue = appContrastOption,
-                    label = { it.label },
+                    label = { it.localizedLabel() },
                     onValueSelected = onContrastOptionChanged
                 )
 
                 if (appThemeMode == AppThemeMode.SYSTEM) {
                     TextBrightnessSlider(
-                        label = "Text brightness (Light)",
+                        label = readerString("app_theme_text_brightness_light", "Text brightness (Light)"),
                         value = appTextDimFactorLight,
                         onValueChange = onTextDimFactorLightChanged
                     )
                     TextBrightnessSlider(
-                        label = "Text brightness (Dark)",
+                        label = readerString("app_theme_text_brightness_dark", "Text brightness (Dark)"),
                         value = appTextDimFactorDark,
                         onValueChange = onTextDimFactorDarkChanged
                     )
                 } else {
                     TextBrightnessSlider(
-                        label = "Text brightness",
+                        label = readerString("app_theme_text_brightness", "Text brightness"),
                         value = if (appThemeMode == AppThemeMode.DARK) appTextDimFactorDark else appTextDimFactorLight,
                         onValueChange = if (appThemeMode == AppThemeMode.DARK) onTextDimFactorDarkChanged else onTextDimFactorLightChanged
                     )
                 }
 
-                SettingsLabel("Color scheme")
+                SettingsLabel(readerString("app_theme_color_scheme", "Color scheme"))
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -301,14 +324,14 @@ fun SharedAppThemeSettingsDialog(
                     ThemeSwatch(
                         color = MaterialTheme.colorScheme.primary,
                         selected = appSeedColor == null,
-                        label = "Dynamic",
+                        label = readerString("app_theme_dynamic", "Dynamic"),
                         onClick = { onSeedColorChanged(null) }
                     )
                     AppThemePresets.forEach { preset ->
                         ThemeSwatch(
                             color = preset.color,
                             selected = appSeedColor == preset.color,
-                            label = preset.name,
+                            label = readerString(preset.nameKey, preset.nameFallback),
                             onClick = { onSeedColorChanged(preset.color) }
                         )
                     }
@@ -321,15 +344,15 @@ fun SharedAppThemeSettingsDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    SettingsLabel("My themes")
+                    SettingsLabel(readerString("theme_my_themes", "My themes"))
                     IconButton(onClick = { showCreateDialog = true }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.Add, contentDescription = "Add custom theme")
+                        Icon(Icons.Default.Add, contentDescription = readerString("content_desc_add_custom_theme", "Add custom theme"))
                     }
                 }
 
                 if (customAppThemes.isEmpty()) {
                     Text(
-                        "No custom themes yet",
+                        readerString("desktop_no_custom_themes_yet", "No custom themes yet"),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -353,7 +376,7 @@ fun SharedAppThemeSettingsDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("Done")
+                Text(readerString("action_done", "Done"))
             }
         }
     )
@@ -365,7 +388,7 @@ fun SharedAppThemeSettingsDialog(
                 onCustomThemeAdded(
                     CustomAppTheme(
                         id = Random.nextLong().toString(),
-                        name = name.ifBlank { "Custom" },
+                        name = name.ifBlank { defaultCustomThemeName },
                         seedColor = color
                     )
                 )
@@ -389,7 +412,7 @@ private fun SettingsLabel(label: String) {
 private fun <T> SegmentedControl(
     values: List<T>,
     selectedValue: T,
-    label: (T) -> String,
+    label: @Composable (T) -> String,
     onValueSelected: (T) -> Unit
 ) {
     Row(
@@ -401,6 +424,7 @@ private fun <T> SegmentedControl(
     ) {
         values.forEach { value ->
             val selected = selectedValue == value
+            val valueLabel = label(value)
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -411,7 +435,7 @@ private fun <T> SegmentedControl(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = label(value),
+                    text = valueLabel,
                     color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
@@ -501,7 +525,7 @@ private fun ThemeSwatch(
             if (onDelete != null) {
                 Icon(
                     Icons.Default.Close,
-                    contentDescription = "Delete",
+                    contentDescription = readerString("action_delete", "Delete"),
                     tint = MaterialTheme.colorScheme.error,
                     modifier = Modifier.size(16.dp).clickable(onClick = onDelete)
                 )
@@ -519,6 +543,7 @@ private fun SharedCreateAppThemeDialog(
     var name by remember { mutableStateOf("") }
     var hsv by remember(initialColor) { mutableStateOf(initialColor.toSharedHsvColor()) }
     val color = hsv.toComposeColor()
+    val defaultCustomThemeName = readerString("desktop_custom_theme_default", "Custom")
 
     fun updateFromColor(nextColor: Color) {
         hsv = nextColor.toSharedHsvColor()
@@ -526,7 +551,7 @@ private fun SharedCreateAppThemeDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Create theme") },
+        title = { Text(readerString("desktop_create_theme", "Create theme")) },
         text = {
             Column(
                 modifier = Modifier.widthIn(max = 560.dp).verticalScroll(rememberScrollState()),
@@ -536,7 +561,7 @@ private fun SharedCreateAppThemeDialog(
                 SharedStableOutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Theme name") },
+                    label = { Text(readerString("theme_name", "Theme name")) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -574,7 +599,7 @@ private fun SharedCreateAppThemeDialog(
                         modifier = Modifier.weight(1.6f),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text("Hex", color = Color.Gray, fontSize = 12.sp, maxLines = 1)
+                        Text(readerString("theme_color_hex", "Hex"), color = Color.Gray, fontSize = 12.sp, maxLines = 1)
                         Spacer(Modifier.height(4.dp))
                         SharedHexInput(color = color, onHexChanged = { updateFromColor(it) })
                     }
@@ -607,18 +632,18 @@ private fun SharedCreateAppThemeDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onSave(name.trim().ifBlank { "Custom" }, color) },
+                onClick = { onSave(name.trim().ifBlank { defaultCustomThemeName }, color) },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = color,
                     contentColor = if (color.luminance() > 0.5f) Color.Black else Color.White
                 )
             ) {
-                Text("Save", fontWeight = FontWeight.Bold)
+                Text(readerString("action_save", "Save"), fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancel")
+                Text(readerString("action_cancel", "Cancel"))
             }
         }
     )
@@ -664,7 +689,7 @@ fun SharedHsvColorPickerDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
                     IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
+                        Icon(Icons.Default.Close, contentDescription = readerString("action_close", "Close"))
                     }
                 }
                 Column(
@@ -710,7 +735,7 @@ fun SharedHsvColorPickerDialog(
                             modifier = Modifier.weight(1.6f),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Text("Hex", color = Color.Gray, fontSize = 12.sp, maxLines = 1)
+                            Text(readerString("theme_color_hex", "Hex"), color = Color.Gray, fontSize = 12.sp, maxLines = 1)
                             Spacer(Modifier.height(4.dp))
                             SharedHexInput(color = color, onHexChanged = { updateFromColor(it) })
                         }
@@ -746,7 +771,7 @@ fun SharedHsvColorPickerDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(onClick = onDismiss) {
-                        Text("Cancel")
+                        Text(readerString("action_cancel", "Cancel"))
                     }
                     Button(
                         onClick = { onSave(color) },
@@ -755,7 +780,7 @@ fun SharedHsvColorPickerDialog(
                             contentColor = if (color.luminance() > 0.5f) Color.Black else Color.White
                         )
                     ) {
-                        Text("Save", fontWeight = FontWeight.Bold)
+                        Text(readerString("action_save", "Save"), fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1161,33 +1186,38 @@ private fun ColorScheme.withTextDimFactor(factor: Float): ColorScheme {
 }
 
 private data class AppThemePreset(
-    val name: String,
+    val nameKey: String,
+    val nameFallback: String,
     val color: Color
 )
 
 private val AppThemePresets = listOf(
-    AppThemePreset("Ocean", Color(0xFF00668B)),
-    AppThemePreset("Mint", Color(0xFF006C4C)),
-    AppThemePreset("Rose", Color(0xFF9C4146)),
-    AppThemePreset("Sepia", Color(0xFF705D49)),
-    AppThemePreset("Amethyst", Color(0xFF9B59B6)),
-    AppThemePreset("Amber", Color(0xFFFFC107)),
-    AppThemePreset("Sapphire", Color(0xFF0F52BA))
+    AppThemePreset("desktop_theme_preset_ocean", "Ocean", Color(0xFF00668B)),
+    AppThemePreset("desktop_theme_preset_mint", "Mint", Color(0xFF006C4C)),
+    AppThemePreset("desktop_theme_preset_rose", "Rose", Color(0xFF9C4146)),
+    AppThemePreset("desktop_theme_preset_sepia", "Sepia", Color(0xFF705D49)),
+    AppThemePreset("desktop_theme_preset_amethyst", "Amethyst", Color(0xFF9B59B6)),
+    AppThemePreset("desktop_theme_preset_amber", "Amber", Color(0xFFFFC107)),
+    AppThemePreset("desktop_theme_preset_sapphire", "Sapphire", Color(0xFF0F52BA))
 )
 
-private val AppThemeMode.label: String
-    get() = when (this) {
-        AppThemeMode.SYSTEM -> "System"
-        AppThemeMode.LIGHT -> "Light"
-        AppThemeMode.DARK -> "Dark"
+@Composable
+private fun AppThemeMode.localizedLabel(): String {
+    return when (this) {
+        AppThemeMode.SYSTEM -> readerString("language_system_default", "System")
+        AppThemeMode.LIGHT -> readerString("app_theme_mode_light", "Light")
+        AppThemeMode.DARK -> readerString("app_theme_mode_dark", "Dark")
     }
+}
 
-private val AppContrastOption.label: String
-    get() = when (this) {
-        AppContrastOption.STANDARD -> "Standard"
-        AppContrastOption.MEDIUM -> "Medium"
-        AppContrastOption.HIGH -> "High"
+@Composable
+private fun AppContrastOption.localizedLabel(): String {
+    return when (this) {
+        AppContrastOption.STANDARD -> readerString("app_contrast_standard", "Standard")
+        AppContrastOption.MEDIUM -> readerString("app_contrast_medium", "Medium")
+        AppContrastOption.HIGH -> readerString("app_contrast_high", "High")
     }
+}
 
 internal data class SharedHsvColor(
     val hue: Float,

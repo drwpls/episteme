@@ -4,6 +4,7 @@ import android.content.Context
 import com.aryan.reader.R
 import com.aryan.reader.epub.EpubBook
 import com.aryan.reader.epub.EpubChapter
+import com.aryan.reader.epub.hasReadableExtractedContent
 import com.aryan.reader.paginatedreader.Locator
 import com.aryan.reader.paginatedreader.LocatorConverter
 import io.mockk.coEvery
@@ -47,7 +48,36 @@ class EpubReaderContentTest {
         assertFalse(result.chunks.joinToString().contains("<script>"))
         assertTrue(result.chunks[0].contains("Paragraph 20"))
         assertTrue(result.chunks[1].contains("Paragraph 21"))
+        assertEquals(listOf(0, 20), result.chunkElementStartIndices)
+        assertEquals(listOf(20, 1), result.chunkElementCounts)
         assertEquals(0, result.startChunkIndex)
+    }
+
+    @Test
+    fun `loadChapterContent records element starts independently from whitespace text nodes`() = runTest {
+        val root = temp.newFolder("content-whitespace")
+        val body = (1..25).joinToString(separator = "\n", prefix = "\n", postfix = "\n") { index ->
+            "<p>Paragraph $index</p>"
+        }
+        writeChapter(root, "chapter.xhtml", "<html><body>$body</body></html>")
+        val book = epubBook(root, listOf(chapter("chapter.xhtml")))
+
+        val result = loadChapterContent(
+            context = contextWithStrings(),
+            epubBook = book,
+            chapterIndex = 0,
+            chunkTargetOverride = null,
+            isInitialCfiLoad = false,
+            cfiToLoad = null,
+            locatorConverter = mockk()
+        )
+
+        assertEquals(listOf(0, 10, 20), result.chunkElementStartIndices)
+        assertEquals(listOf(10, 10, 5), result.chunkElementCounts)
+        assertEquals(
+            "data-chunk-index='1' data-element-start-index='10' data-element-count='10'",
+            readerChunkContainerAttributes(1, result.chunkElementStartIndices, result.chunkElementCounts)
+        )
     }
 
     @Test
@@ -62,6 +92,19 @@ class EpubReaderContentTest {
 
         assertEquals(0, high.startChunkIndex)
         assertEquals(0, low.startChunkIndex)
+    }
+
+    @Test
+    fun `loadChapterContent ignores fragment and query in chapter file path`() = runTest {
+        val root = temp.newFolder("path-fragment")
+        writeChapter(root, "chapter.xhtml", "<html><body><p>Found chapter</p></body></html>")
+        val book = epubBook(root, listOf(chapter("chapter.xhtml#anchor?ignored")))
+
+        val result = loadChapterContent(contextWithStrings(), book, 0, null, false, null, mockk())
+
+        assertTrue(book.hasReadableExtractedContent())
+        assertTrue(result.isSuccess)
+        assertEquals(listOf("<p>Found chapter</p>"), result.chunks)
     }
 
     @Test

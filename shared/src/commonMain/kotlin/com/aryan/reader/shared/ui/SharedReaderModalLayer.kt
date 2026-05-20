@@ -16,7 +16,11 @@ internal val LocalSharedReaderModalAnchorBounds = compositionLocalOf<SharedReade
 
 internal enum class SharedReaderModalLevel {
     Panel,
-    Popup
+    PanelLeft,
+    PanelRight,
+    Popup,
+    ChromeTop,
+    ChromeBottom
 }
 
 val SharedReaderPopupDefaultMaxWidth = 440.dp
@@ -39,6 +43,14 @@ fun sharedReaderPopupWidth(
 internal expect fun SharedReaderModalLayer(
     onDismiss: () -> Unit,
     level: SharedReaderModalLevel = SharedReaderModalLevel.Popup,
+    content: @Composable () -> Unit
+)
+
+internal expect fun sharedReaderModalLayerUsesSizedEdgeWindow(level: SharedReaderModalLevel): Boolean
+
+@Composable
+expect fun SharedReaderModalOwnerWindowProvider(
+    ownerWindow: Any?,
     content: @Composable () -> Unit
 )
 

@@ -16,6 +16,7 @@ enum class ReaderWorkspaceKind {
 
 enum class ReaderWorkspaceLeftSection(val title: String) {
     CONTENTS("Contents"),
+    IMAGES("Images"),
     SEARCH("Search"),
     BOOKMARKS("Bookmarks"),
     NOTES("Annotations"),
@@ -33,6 +34,7 @@ enum class ReaderWorkspaceTopAction {
     CONTENTS,
     SEARCH,
     BOOKMARK,
+    FILE_ACTIONS,
     FULL_SCREEN,
     APPEARANCE,
     READ_ALOUD,
@@ -52,6 +54,23 @@ data class ReaderWorkspaceChromeModel(
     val forceVisible: Boolean,
     val forceVisibleReasons: Set<String> = emptySet()
 )
+
+data class ReaderWorkspaceFileActionState(
+    val canShare: Boolean = false,
+    val canSaveCopy: Boolean = false,
+    val canPrint: Boolean = false,
+    val canGenerateTextView: Boolean = false,
+    val hasGeneratedTextView: Boolean = false,
+    val isGeneratingTextView: Boolean = false
+) {
+    val hasAnyAction: Boolean
+        get() = canShare ||
+            canSaveCopy ||
+            canPrint ||
+            canGenerateTextView ||
+            hasGeneratedTextView ||
+            isGeneratingTextView
+}
 
 data class ReaderWorkspacePanelDefaults(
     val leftOpen: Boolean = false,
@@ -81,7 +100,8 @@ fun epubReaderWorkspaceModel(
     val leftSections = listOf(
         ReaderWorkspaceLeftSection.CONTENTS,
         ReaderWorkspaceLeftSection.NOTES,
-        ReaderWorkspaceLeftSection.BOOKMARKS
+        ReaderWorkspaceLeftSection.BOOKMARKS,
+        ReaderWorkspaceLeftSection.IMAGES
     )
     val inspectorSections = buildList {
         if (preferences.isVisible(ReaderTool.THEME) || preferences.isVisible(ReaderTool.FORMAT)) {
@@ -121,7 +141,7 @@ fun epubReaderWorkspaceModel(
         topActions = topActions,
         bottomActions = bottomActions,
         chrome = readerWorkspaceChromeModel(
-            preferAutoHide = false,
+            preferAutoHide = true,
             searchActive = session.isSearchActive,
             leftPanelOpen = false,
             inspectorOpen = false,
@@ -186,6 +206,7 @@ fun pdfReaderWorkspaceModel(
         add(ReaderWorkspaceTopAction.CONTENTS)
         add(ReaderWorkspaceTopAction.SEARCH)
         add(ReaderWorkspaceTopAction.BOOKMARK)
+        add(ReaderWorkspaceTopAction.FILE_ACTIONS)
         add(ReaderWorkspaceTopAction.FULL_SCREEN)
         add(ReaderWorkspaceTopAction.APPEARANCE)
         if (cloudTtsAvailable) add(ReaderWorkspaceTopAction.READ_ALOUD)
@@ -205,7 +226,7 @@ fun pdfReaderWorkspaceModel(
         ),
         defaultPdfInteractionMode = null,
         chrome = readerWorkspaceChromeModel(
-            preferAutoHide = false,
+            preferAutoHide = true,
             searchActive = searchActive || state.searchQuery.isNotBlank(),
             leftPanelOpen = false,
             inspectorOpen = false,

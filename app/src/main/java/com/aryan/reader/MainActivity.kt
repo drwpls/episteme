@@ -37,6 +37,7 @@ import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSiz
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.rememberNavController
@@ -49,6 +50,12 @@ import androidx.compose.runtime.getValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.util.UnstableApi
+import com.aryan.reader.tts.ACTION_OPEN_TTS_SESSION
+import com.aryan.reader.tts.EXTRA_TTS_BOOK_ID
+import com.aryan.reader.tts.EXTRA_TTS_CHAPTER_INDEX
+import com.aryan.reader.tts.EXTRA_TTS_PAGE_INDEX
+import com.aryan.reader.tts.EXTRA_TTS_SOURCE_CFI
+import com.aryan.reader.tts.EXTRA_TTS_START_OFFSET
 
 @UnstableApi
 class MainActivity : AppCompatActivity() {
@@ -89,6 +96,7 @@ class MainActivity : AppCompatActivity() {
 
         setContent {
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+            val customFonts by viewModel.customFonts.collectAsStateWithLifecycle()
 
             ScreenCaptureProtectionEffect(enabled = uiState.isScreenCaptureProtectionEnabled)
 
@@ -99,13 +107,17 @@ class MainActivity : AppCompatActivity() {
             }
 
             val textDimFactor = if (darkTheme) uiState.appTextDimFactorDark else uiState.appTextDimFactorLight
+            val appFontFamily = remember(uiState.appFontPreference, customFonts) {
+                uiState.appFontPreference.toAndroidAppFontFamily(customFonts)
+            }
 
             AppTheme(
                 darkTheme = darkTheme,
                 dynamicColor = uiState.appSeedColor == null,
                 seedColor = uiState.appSeedColor,
                 contrastLevel = uiState.appContrastOption.value,
-                textDimFactor = textDimFactor
+                textDimFactor = textDimFactor,
+                appFontFamily = appFontFamily
             ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -125,10 +137,26 @@ class MainActivity : AppCompatActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 
     private fun handleIntent(intent: Intent?) {
+        if (intent?.action == ACTION_OPEN_TTS_SESSION) {
+            val bookId = intent.getStringExtra(EXTRA_TTS_BOOK_ID)
+            if (!bookId.isNullOrBlank()) {
+                Timber.d("Received TTS notification intent for bookId=$bookId")
+                viewModel.openTtsNotificationTarget(
+                    bookId = bookId,
+                    sourceCfi = intent.getStringExtra(EXTRA_TTS_SOURCE_CFI),
+                    startOffset = intent.getIntExtra(EXTRA_TTS_START_OFFSET, -1).takeIf { it >= 0 },
+                    chapterIndex = intent.getIntExtra(EXTRA_TTS_CHAPTER_INDEX, -1).takeIf { it >= 0 },
+                    pageIndex = intent.getIntExtra(EXTRA_TTS_PAGE_INDEX, -1).takeIf { it >= 0 }
+                )
+            }
+            return
+        }
+
         if (intent?.action == Intent.ACTION_VIEW && intent.data != null) {
             Timber.d("Received VIEW intent with URI: ${intent.data}")
             val uri = intent.data!!

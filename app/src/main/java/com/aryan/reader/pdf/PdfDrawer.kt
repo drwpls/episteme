@@ -48,6 +48,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -81,6 +82,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import timber.log.Timber
 import androidx.core.graphics.createBitmap
+import com.aryan.reader.cardTitle
 import com.aryan.reader.data.RecentFileItem
 import com.aryan.reader.pdf.data.VirtualPage
 
@@ -316,9 +318,12 @@ private fun PdfTabsDrawerPage(
     activeTabBookId: String?,
     currentPage: Int,
     totalPages: Int,
+    isTopTabStripVisible: Boolean,
     onTabSelected: (String) -> Unit,
     onTabClosed: (String) -> Unit,
-    onNewTabClick: () -> Unit
+    onNewTabClick: () -> Unit,
+    onTopTabStripVisibilityChange: (Boolean) -> Unit,
+    usePdfFileNameAsDisplayName: Boolean
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -357,6 +362,28 @@ private fun PdfTabsDrawerPage(
 
         HorizontalDivider()
 
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onTopTabStripVisibilityChange(!isTopTabStripVisible) }
+                .padding(start = 16.dp, end = 12.dp, top = 10.dp, bottom = 10.dp)
+                .testTag("PdfTopTabStripVisibilityToggle"),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = stringResource(R.string.pdf_tabs_show_top_app_bar_tabs),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f)
+            )
+            Switch(
+                checked = isTopTabStripVisible,
+                onCheckedChange = null
+            )
+        }
+
+        HorizontalDivider()
+
         if (openTabs.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -382,7 +409,8 @@ private fun PdfTabsDrawerPage(
                         currentPage = currentPage,
                         totalPages = totalPages,
                         onTabSelected = onTabSelected,
-                        onTabClosed = onTabClosed
+                        onTabClosed = onTabClosed,
+                        usePdfFileNameAsDisplayName = usePdfFileNameAsDisplayName
                     )
                 }
             }
@@ -397,7 +425,8 @@ private fun PdfDrawerTabItem(
     currentPage: Int,
     totalPages: Int,
     onTabSelected: (String) -> Unit,
-    onTabClosed: (String) -> Unit
+    onTabClosed: (String) -> Unit,
+    usePdfFileNameAsDisplayName: Boolean
 ) {
     val shape = RoundedCornerShape(8.dp)
     val containerColor by animateColorAsState(
@@ -485,7 +514,7 @@ private fun PdfDrawerTabItem(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = tab.customName ?: tab.title ?: tab.displayName,
+                    text = tab.cardTitle(usePdfFileNameAsDisplayName),
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
                     color = contentColor,
@@ -542,11 +571,14 @@ internal fun PdfNavigationDrawerContent(
     isTabsEnabled: Boolean = false,
     openTabs: List<RecentFileItem> = emptyList(),
     activeTabBookId: String? = null,
+    usePdfFileNameAsDisplayName: Boolean = false,
+    isTopTabStripVisible: Boolean = true,
     customHighlightColors: Map<PdfHighlightColor, Color>,
     onPageSelected: (Int) -> Unit,
     onTabSelected: (String) -> Unit = {},
     onTabClosed: (String) -> Unit = {},
     onNewTabClick: () -> Unit = {},
+    onTopTabStripVisibilityChange: (Boolean) -> Unit = {},
     onRenameBookmark: (PdfBookmark, String) -> Unit,
     onDeleteBookmark: (PdfBookmark) -> Unit,
     onDeleteHighlight: (PdfUserHighlight) -> Unit,
@@ -601,6 +633,7 @@ internal fun PdfNavigationDrawerContent(
                     activeTabBookId = activeTabBookId,
                     currentPage = currentPage,
                     totalPages = totalPages,
+                    isTopTabStripVisible = isTopTabStripVisible,
                     onTabSelected = { bookId ->
                         if (bookId == activeTabBookId) {
                             onCloseDrawer()
@@ -610,7 +643,9 @@ internal fun PdfNavigationDrawerContent(
                         }
                     },
                     onTabClosed = onTabClosed,
-                    onNewTabClick = onNewTabClick
+                    onNewTabClick = onNewTabClick,
+                    onTopTabStripVisibilityChange = onTopTabStripVisibilityChange,
+                    usePdfFileNameAsDisplayName = usePdfFileNameAsDisplayName
                 )
 
                 PdfDrawerSection.CHAPTERS -> { // Chapters Page

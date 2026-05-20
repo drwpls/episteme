@@ -17,3 +17,15 @@ internal actual fun SharedReaderModalLayer(
         content()
     }
 }
+
+internal actual fun sharedReaderModalLayerUsesSizedEdgeWindow(level: SharedReaderModalLevel): Boolean {
+    return false
+}
+
+@Composable
+actual fun SharedReaderModalOwnerWindowProvider(
+    ownerWindow: Any?,
+    content: @Composable () -> Unit
+) {
+    content()
+}

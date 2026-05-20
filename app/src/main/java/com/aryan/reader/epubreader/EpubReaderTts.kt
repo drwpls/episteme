@@ -327,20 +327,27 @@ private fun handleVerticalAutoAdvance(
             Timber.tag("TTS_CHAPTER_CHANGE_DIAG").d("Vertical: Loading remaining text of current chapter natively.")
             val nativeChunks = locatorConverter.getTtsChunksForChapter(epubBook, currentTtsChapterIndex)
 
-            if (!nativeChunks.isNullOrEmpty() && lastReadCfi != null) {
-                val lastCfiPath = lastReadCfi.split(":")[0]
-                val resumeIdx = nativeChunks.indexOfLast { it.sourceCfi.split(":")[0] == lastCfiPath }
+            if (!nativeChunks.isNullOrEmpty()) {
+                val resumeIdx = findTtsChunkResumeIndex(
+                    chunks = nativeChunks,
+                    sourceCfi = lastReadCfi,
+                    startOffsetInSource = currentState.startOffsetInSource,
+                    currentText = currentState.currentText,
+                    currentChunkIndexFallback = currentState.currentChunkIndex
+                )
 
-                if (resumeIdx != -1 && resumeIdx + 1 < nativeChunks.size) {
-                    val remainingChunks = nativeChunks.subList(resumeIdx + 1, nativeChunks.size)
+                if (resumeIdx != null && resumeIdx + 1 < nativeChunks.size) {
+                    val startChunkIndex = resumeIdx + 1
                     val token = getAuthToken()
                     ttsController.start(
-                        chunks = remainingChunks.withTtsReplacements(ttsReplacementPreferences, ttsReplacementBookId),
+                        chunks = nativeChunks.withTtsReplacements(ttsReplacementPreferences, ttsReplacementBookId),
                         bookTitle = epubBookTitle,
                         chapterTitle = chapters.getOrNull(currentTtsChapterIndex)?.title,
                         coverImageUri = coverImagePath?.let { android.net.Uri.fromFile(File(it)).toString() },
+                        bookId = ttsReplacementBookId,
                         chapterIndex = currentTtsChapterIndex,
                         totalChapters = chapters.size,
+                        startChunkIndex = startChunkIndex,
                         continueSession = true,
                         ttsMode = currentTtsMode,
                         playbackSource = "READER",
@@ -371,6 +378,7 @@ private fun handleVerticalAutoAdvance(
                     bookTitle = epubBookTitle,
                     chapterTitle = chapters.getOrNull(nextIdx)?.title,
                     coverImageUri = coverImagePath?.let { Uri.fromFile(File(it)).toString() },
+                    bookId = ttsReplacementBookId,
                     chapterIndex = nextIdx,
                     totalChapters = chapters.size,
                     continueSession = true,
@@ -450,6 +458,7 @@ private fun handlePaginatedAutoAdvance(
                         bookTitle = epubBookTitle,
                         chapterTitle = chapterTitle,
                         coverImageUri = coverUriString,
+                        bookId = ttsReplacementBookId,
                         chapterIndex = chapterToTry,
                         totalChapters = chapters.size,
                         continueSession = true,

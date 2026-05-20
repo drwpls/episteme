@@ -14,10 +14,12 @@ import com.aryan.reader.shared.progressPercentValue
 import com.aryan.reader.shared.toHomeScreenModel
 
 enum class SharedAppToolAction {
+    SETTINGS,
     IMPORT_FILES,
     IMPORT_FOLDER,
     SYNC,
     APP_THEME,
+    PRO,
     AI_SETTINGS,
     CUSTOM_FONTS,
     HELP_FEEDBACK,
@@ -39,24 +41,27 @@ fun sharedAppShellModel(
     featurePolicy: SharedFeaturePolicy = SharedFeaturePolicy.Standard
 ): SharedAppShellModel {
     val primaryTabs = buildList {
-        add(SharedAppTab.HOME)
         add(SharedAppTab.LIBRARY)
         if (featurePolicy.opdsCatalogs) add(SharedAppTab.CATALOGS)
     }
     val selectedPrimaryTab = when (selectedTab) {
+        SharedAppTab.HOME -> SharedAppTab.LIBRARY
         SharedAppTab.SHELVES -> SharedAppTab.LIBRARY
         SharedAppTab.SETTINGS,
+        SharedAppTab.PRO,
         SharedAppTab.CUSTOM_FONTS,
         SharedAppTab.SUPPORT,
         SharedAppTab.FEEDBACK,
-        SharedAppTab.ABOUT -> SharedAppTab.HOME
+        SharedAppTab.ABOUT -> SharedAppTab.LIBRARY
         else -> selectedTab
-    }.takeIf { it in primaryTabs } ?: SharedAppTab.HOME
+    }.takeIf { it in primaryTabs } ?: SharedAppTab.LIBRARY
     val toolActions = buildList {
+        add(SharedAppToolAction.SETTINGS)
         add(SharedAppToolAction.IMPORT_FILES)
         add(SharedAppToolAction.IMPORT_FOLDER)
         add(SharedAppToolAction.SYNC)
         add(SharedAppToolAction.APP_THEME)
+        if (featurePolicy.aiAndCloud) add(SharedAppToolAction.PRO)
         if (aiSettingsAvailable && featurePolicy.aiAndCloud) add(SharedAppToolAction.AI_SETTINGS)
         add(SharedAppToolAction.CUSTOM_FONTS)
         if (featurePolicy.projectLinks) {
@@ -124,28 +129,72 @@ data class NonReaderLibraryOrganizationModel(
 )
 
 internal data class NonReaderLibraryFileTypeGroup(
-    val title: String,
+    val titleKey: String,
+    val titleFallback: String,
     val fileTypes: List<FileType>
 )
 
 private val LibraryFileTypeGroupTemplates = listOf(
     NonReaderLibraryFileTypeGroup(
-        title = "Books",
+        titleKey = "desktop_file_type_group_books",
+        titleFallback = "Books",
         fileTypes = listOf(FileType.EPUB, FileType.MOBI, FileType.FB2)
     ),
     NonReaderLibraryFileTypeGroup(
-        title = "Documents",
+        titleKey = "desktop_file_type_group_documents",
+        titleFallback = "Documents",
         fileTypes = listOf(FileType.PDF, FileType.PPTX, FileType.DOCX, FileType.ODT, FileType.FODT)
     ),
     NonReaderLibraryFileTypeGroup(
-        title = "Text and web",
+        titleKey = "desktop_file_type_group_text_web",
+        titleFallback = "Text and web",
         fileTypes = listOf(FileType.MD, FileType.TXT, FileType.HTML)
     ),
     NonReaderLibraryFileTypeGroup(
-        title = "Comics",
+        titleKey = "desktop_file_type_group_comics",
+        titleFallback = "Comics",
         fileTypes = listOf(FileType.CBZ, FileType.CBR, FileType.CB7)
     )
 )
+
+private val AndroidLibraryTabs = listOf(
+    NonReaderLibraryTab.BOOKS,
+    NonReaderLibraryTab.SHELVES,
+    NonReaderLibraryTab.FOLDERS
+)
+
+private val DesktopLibraryTabs = listOf(
+    NonReaderLibraryTab.BOOKS,
+    NonReaderLibraryTab.SHELVES,
+    NonReaderLibraryTab.FOLDERS
+)
+
+internal fun visibleNonReaderLibraryTabs(
+    platform: ReaderPlatform = ReaderPlatform.ANDROID
+): List<NonReaderLibraryTab> {
+    return when (platform) {
+        ReaderPlatform.ANDROID -> AndroidLibraryTabs
+        ReaderPlatform.DESKTOP -> DesktopLibraryTabs
+    }
+}
+
+internal fun NonReaderLibraryTab.visibleLibraryTab(
+    platform: ReaderPlatform = ReaderPlatform.ANDROID
+): NonReaderLibraryTab {
+    return takeIf { it in visibleNonReaderLibraryTabs(platform) } ?: NonReaderLibraryTab.BOOKS
+}
+
+internal fun SharedReaderScreenState.booksForNonReaderLibraryTab(
+    tab: NonReaderLibraryTab,
+    platform: ReaderPlatform = ReaderPlatform.ANDROID
+): List<BookItem> {
+    return when (tab.visibleLibraryTab(platform)) {
+        NonReaderLibraryTab.UNREAD -> libraryBooks.filter { progressPercentValue(it.progressPercentage) == 0 }
+        NonReaderLibraryTab.IN_PROGRESS -> libraryBooks.filter { progressPercentValue(it.progressPercentage) in 1..99 }
+        NonReaderLibraryTab.COMPLETED -> libraryBooks.filter { progressPercentValue(it.progressPercentage) >= 100 }
+        else -> libraryBooks
+    }
+}
 
 internal fun nonReaderLibraryFileTypeGroups(
     platform: ReaderPlatform = ReaderPlatform.DESKTOP
@@ -163,7 +212,11 @@ internal fun nonReaderLibraryFileTypeGroups(
     return if (otherTypes.isEmpty()) {
         grouped
     } else {
-        grouped + NonReaderLibraryFileTypeGroup("Other", otherTypes)
+        grouped + NonReaderLibraryFileTypeGroup(
+            titleKey = "desktop_file_type_group_other",
+            titleFallback = "Other",
+            fileTypes = otherTypes
+        )
     }
 }
 

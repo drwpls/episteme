@@ -144,6 +144,7 @@ import androidx.core.net.toUri
 import androidx.core.text.HtmlCompat
 import com.aryan.reader.data.BookMetadataEdit
 import com.aryan.reader.data.RecentFileItem
+import com.aryan.reader.shared.SharedText
 import com.aryan.reader.shared.ui.SharedMarkdownText
 import timber.log.Timber
 import java.text.SimpleDateFormat
@@ -239,7 +240,8 @@ fun rememberFilePickerLauncher(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
         onResult = { uris: List<Uri> ->
             if (uris.isNotEmpty()) {
-                Timber.d("${uris.size} file(s) selected.")
+                val fileLabel = if (uris.size == 1) "file" else "files"
+                Timber.d("${uris.size} $fileLabel selected.")
                 onFilesSelected(uris)
             } else {
                 Timber.d("File selection cancelled.")
@@ -383,6 +385,7 @@ fun DeleteConfirmationDialog(
 @Composable
 fun FileInfoDialog(
     item: RecentFileItem,
+    usePdfFileNameAsDisplayName: Boolean = false,
     onDismiss: () -> Unit,
     onSaveMetadata: (BookMetadataEdit) -> Unit,
     onSaveDisplayName: (String?) -> Unit,
@@ -399,8 +402,8 @@ fun FileInfoDialog(
         mutableStateOf(item.seriesIndex?.formatMetadataNumber().orEmpty())
     }
     var descriptionInput by remember(item.bookId, item.description) { mutableStateOf(item.description.orEmpty()) }
-    var displayNameInput by remember(item.bookId, item.customName, item.title, item.displayName) {
-        mutableStateOf(item.customName ?: item.cardTitle())
+    var displayNameInput by remember(item.bookId, item.customName, item.title, item.displayName, usePdfFileNameAsDisplayName) {
+        mutableStateOf(item.customName ?: item.cardTitle(usePdfFileNameAsDisplayName))
     }
     var showRestoreConfirmation by remember(item.bookId) { mutableStateOf(false) }
 
@@ -455,7 +458,7 @@ fun FileInfoDialog(
                     } else {
                         stringResource(R.string.file_information)
                     },
-                    subtitle = item.cardTitle(),
+                    subtitle = item.cardTitle(usePdfFileNameAsDisplayName),
                     onClose = {
                         if (isEditing) {
                             isEditing = false
@@ -498,6 +501,7 @@ fun FileInfoDialog(
                     } else {
                         BookMetadataInfoContent(
                             item = item,
+                            usePdfFileNameAsDisplayName = usePdfFileNameAsDisplayName,
                             formattedDate = formattedDate,
                             lastModifiedDate = lastModifiedDate,
                             pathText = pathTextFinal,
@@ -611,6 +615,7 @@ private fun FileInfoTopBar(
 @Composable
 private fun BookMetadataInfoContent(
     item: RecentFileItem,
+    usePdfFileNameAsDisplayName: Boolean,
     formattedDate: String,
     lastModifiedDate: String?,
     pathText: String,
@@ -624,7 +629,7 @@ private fun BookMetadataInfoContent(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                item.cardTitle(),
+                item.cardTitle(usePdfFileNameAsDisplayName),
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 maxLines = 3,
@@ -1120,6 +1125,8 @@ private fun Double.formatMetadataNumber(): String {
 
 @Composable
 fun CustomTopBanner(bannerMessage: BannerMessage?) {
+    val context = LocalContext.current
+    val bannerText = bannerMessage?.localizedMessage(context).orEmpty()
     AnimatedVisibility(
         visible = bannerMessage != null,
         enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
@@ -1138,7 +1145,7 @@ fun CustomTopBanner(bannerMessage: BannerMessage?) {
                 shadowElevation = 8.dp
             ) {
                 Text(
-                    text = bannerMessage?.message ?: "",
+                    text = bannerText,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     color = if (bannerMessage?.isError == true) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer,
                     style = MaterialTheme.typography.bodyMedium,
@@ -1147,6 +1154,25 @@ fun CustomTopBanner(bannerMessage: BannerMessage?) {
             }
         }
     }
+}
+
+private fun BannerMessage.localizedMessage(context: Context): String {
+    return text?.resolveAndroidText(context) ?: message
+}
+
+private fun SharedText.resolveAndroidText(context: Context): String {
+    val resources = context.resources
+    val packageName = context.packageName
+    val formatArgs = args.toTypedArray()
+    val quantityValue = quantity
+    val resolved = if (quantityValue == null) {
+        val id = resources.getIdentifier(name, "string", packageName)
+        if (id == 0) null else runCatching { resources.getString(id, *formatArgs) }.getOrNull()
+    } else {
+        val id = resources.getIdentifier(name, "plurals", packageName)
+        if (id == 0) null else runCatching { resources.getQuantityString(id, quantityValue, *formatArgs) }.getOrNull()
+    }
+    return resolved ?: fallbackMessage()
 }
 
 @Suppress("KotlinConstantConditions")
@@ -1429,7 +1455,12 @@ fun AutoSizeText(
 }
 
 @Composable
-fun FileTypeBadge(type: FileType, modifier: Modifier = Modifier, overlay: Boolean = false) {
+fun FileTypeBadge(
+    type: FileType,
+    modifier: Modifier = Modifier,
+    overlay: Boolean = false,
+    compact: Boolean = false
+) {
     val containerColor = if (overlay) Color.Black.copy(alpha = 0.6f) else MaterialTheme.colorScheme.secondaryContainer
     val contentColor = if (overlay) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
 
@@ -1442,9 +1473,17 @@ fun FileTypeBadge(type: FileType, modifier: Modifier = Modifier, overlay: Boolea
     ) {
         Text(
             text = if (type == FileType.UNKNOWN) "FILE" else type.name.uppercase(),
-            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+            style = if (compact) {
+                MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, letterSpacing = 0.sp)
+            } else {
+                MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp)
+            },
             fontWeight = FontWeight.ExtraBold,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            maxLines = 1,
+            modifier = Modifier.padding(
+                horizontal = if (compact) 6.dp else 10.dp,
+                vertical = if (compact) 3.dp else 4.dp
+            )
         )
     }
 }
@@ -1498,8 +1537,12 @@ fun BookTagChipsRow(
 
 private const val UNKNOWN_AUTHOR_LABEL = "No author listed"
 
-fun RecentFileItem.cardTitle(): String {
-    return customName ?: title?.takeIf { it.isNotBlank() } ?: displayName
+fun RecentFileItem.cardTitle(usePdfFileNameAsDisplayName: Boolean = false): String {
+    customName?.takeIf { it.isNotBlank() }?.let { return it }
+    if (usePdfFileNameAsDisplayName && type == FileType.PDF) {
+        return displayName
+    }
+    return title?.takeIf { it.isNotBlank() } ?: displayName
 }
 
 fun RecentFileItem.cardAuthor(): String {

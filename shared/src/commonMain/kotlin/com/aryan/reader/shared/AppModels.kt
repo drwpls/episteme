@@ -4,11 +4,124 @@ import androidx.compose.ui.graphics.Color
 import com.aryan.reader.shared.pdf.SharedPdfHighlighterPalette
 import com.aryan.reader.shared.reader.ReaderSettings
 
+data class SharedText(
+    val name: String,
+    val fallback: String,
+    val args: List<Any?> = emptyList(),
+    val quantity: Int? = null,
+    val fallbackOther: String = fallback
+) {
+    fun fallbackMessage(): String {
+        val template = if (quantity == null || quantity == 1) fallback else fallbackOther
+        return formatSharedTextFallback(template, args)
+    }
+
+    companion object {
+        fun string(name: String, fallback: String, vararg args: Any?): SharedText {
+            return SharedText(name = name, fallback = fallback, args = args.toList())
+        }
+
+        fun quantity(
+            name: String,
+            quantity: Int,
+            fallbackOne: String,
+            fallbackOther: String,
+            vararg args: Any?
+        ): SharedText {
+            return SharedText(
+                name = name,
+                fallback = fallbackOne,
+                args = args.toList(),
+                quantity = quantity,
+                fallbackOther = fallbackOther
+            )
+        }
+    }
+}
+
 data class BannerMessage(
     val message: String,
     val isError: Boolean = false,
-    val isPersistent: Boolean = false
-)
+    val isPersistent: Boolean = false,
+    val text: SharedText? = null
+) {
+    companion object {
+        fun localized(
+            text: SharedText,
+            isError: Boolean = false,
+            isPersistent: Boolean = false
+        ): BannerMessage {
+            return BannerMessage(
+                message = text.fallbackMessage(),
+                isError = isError,
+                isPersistent = isPersistent,
+                text = text
+            )
+        }
+
+        fun string(
+            name: String,
+            fallback: String,
+            vararg args: Any?,
+            isError: Boolean = false,
+            isPersistent: Boolean = false
+        ): BannerMessage {
+            return localized(
+                text = SharedText.string(name, fallback, *args),
+                isError = isError,
+                isPersistent = isPersistent
+            )
+        }
+
+        fun quantity(
+            name: String,
+            quantity: Int,
+            fallbackOne: String,
+            fallbackOther: String,
+            vararg args: Any?,
+            isError: Boolean = false,
+            isPersistent: Boolean = false
+        ): BannerMessage {
+            return localized(
+                text = SharedText.quantity(name, quantity, fallbackOne, fallbackOther, *args),
+                isError = isError,
+                isPersistent = isPersistent
+            )
+        }
+    }
+}
+
+internal fun formatSharedTextFallback(template: String, args: List<Any?>): String {
+    if (args.isEmpty()) return template.replace("%%", "%")
+
+    val percentPlaceholder = "\u0000PERCENT\u0000"
+    var sequentialIndex = 0
+    var formatted = template.replace("%%", percentPlaceholder)
+
+    formatted = Regex("%(\\d+)\\$[-+#, .(]*\\d*(?:\\.\\d+)?[a-zA-Z]").replace(formatted) { match ->
+        val argIndex = match.groupValues[1].toIntOrNull()?.minus(1)
+        args.getOrNull(argIndex ?: -1).toSharedTextArgument()
+    }
+
+    formatted = Regex("%[-+#, .(]*\\d*(?:\\.\\d+)?[a-zA-Z]").replace(formatted) {
+        args.getOrNull(sequentialIndex++).toSharedTextArgument()
+    }
+
+    return formatted.replace(percentPlaceholder, "%")
+}
+
+private fun Any?.toSharedTextArgument(): String {
+    return when (this) {
+        null -> ""
+        is Float -> trimSharedTextTrailingZeroDecimal(toString())
+        is Double -> trimSharedTextTrailingZeroDecimal(toString())
+        else -> toString()
+    }
+}
+
+private fun trimSharedTextTrailingZeroDecimal(value: String): String {
+    return value.removeSuffix(".0")
+}
 
 data class ImportResult(
     val uriString: String,
@@ -40,6 +153,44 @@ enum class AppContrastOption(val value: Double) {
     STANDARD(0.0),
     MEDIUM(0.5),
     HIGH(1.0)
+}
+
+enum class AppFontPreferenceKind {
+    SYSTEM,
+    SERIF,
+    SANS_SERIF,
+    MONOSPACE,
+    CUSTOM
+}
+
+data class AppFontPreference(
+    val kind: AppFontPreferenceKind = AppFontPreferenceKind.SYSTEM,
+    val customFontId: String? = null
+) {
+    fun sanitized(): AppFontPreference {
+        return when (kind) {
+            AppFontPreferenceKind.CUSTOM -> customFontId
+                ?.takeIf { it.isNotBlank() }
+                ?.let { copy(customFontId = it) }
+                ?: System
+            else -> copy(customFontId = null)
+        }
+    }
+
+    fun referencesCustomFont(fontId: String): Boolean {
+        return kind == AppFontPreferenceKind.CUSTOM && customFontId == fontId
+    }
+
+    companion object {
+        val System = AppFontPreference(AppFontPreferenceKind.SYSTEM)
+        val Serif = AppFontPreference(AppFontPreferenceKind.SERIF)
+        val SansSerif = AppFontPreference(AppFontPreferenceKind.SANS_SERIF)
+        val Monospace = AppFontPreference(AppFontPreferenceKind.MONOSPACE)
+
+        fun custom(customFontId: String): AppFontPreference {
+            return AppFontPreference(AppFontPreferenceKind.CUSTOM, customFontId).sanitized()
+        }
+    }
 }
 
 data class CustomAppTheme(
@@ -113,11 +264,13 @@ data class SharedReaderScreenState(
     val showExternalFileSavePromptFor: String? = null,
     val externalFileBehavior: String = "ASK",
     val useStrictFileFilter: Boolean = false,
+    val usePdfFileNameAsDisplayName: Boolean = false,
     val appThemeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val appContrastOption: AppContrastOption = AppContrastOption.STANDARD,
     val appTextDimFactorLight: Float = 1.0f,
     val appTextDimFactorDark: Float = 1.0f,
     val appSeedColor: Color? = null,
+    val appFontPreference: AppFontPreference = AppFontPreference.System,
     val customAppThemes: List<CustomAppTheme> = emptyList(),
     val readerDefaultSettings: ReaderSettings = ReaderSettings(),
     val pdfReaderDefaultSettings: ReaderSettings = ReaderSettings(themeId = "no_theme"),

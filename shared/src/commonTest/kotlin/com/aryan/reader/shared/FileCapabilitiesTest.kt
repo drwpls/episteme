@@ -14,6 +14,14 @@ class FileCapabilitiesTest {
             PDF_VIEWER_FILE_TYPES + EPUB_READER_FILE_TYPES,
             SharedFileCapabilities.readableTypesFor(ReaderPlatform.ANDROID)
         )
+        assertEquals(
+            PDF_VIEWER_FILE_TYPES,
+            SharedFileCapabilities.readableTypesFor(ReaderPlatform.ANDROID, ReaderFeatureSurface.PDF_VIEWER)
+        )
+        assertEquals(
+            EPUB_READER_FILE_TYPES,
+            SharedFileCapabilities.readableTypesFor(ReaderPlatform.ANDROID, ReaderFeatureSurface.EPUB_READER)
+        )
         assertFalse(FileType.UNKNOWN in SharedFileCapabilities.knownFileTypes)
         assertFalse(FileType.UNKNOWN in SharedFileCapabilities.readableTypesFor(ReaderPlatform.ANDROID))
         assertNull(SharedFileCapabilities.primaryExtensionFor(FileType.UNKNOWN))
@@ -25,6 +33,9 @@ class FileCapabilitiesTest {
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             SharedFileCapabilities.mimeTypeFor(FileType.PPTX)
         )
+        assertTrue("application/pdf" in SharedFileCapabilities.androidFilePickerMimeTypes)
+        assertTrue("text/x-kotlin" in SharedFileCapabilities.androidFilePickerMimeTypes)
+        assertFalse("*/*" in SharedFileCapabilities.androidFilePickerMimeTypes)
         assertEquals(
             setOf(
                 FileType.EPUB,
@@ -38,6 +49,7 @@ class FileCapabilitiesTest {
                 FileType.CBR,
                 FileType.CB7,
                 FileType.DOCX,
+                FileType.PPTX,
                 FileType.ODT,
                 FileType.FODT
             ),
@@ -59,7 +71,10 @@ class FileCapabilitiesTest {
             ReaderFeatureSurface.PDF_VIEWER,
             SharedFileCapabilities.surfaceFor(FileType.PPTX, ReaderPlatform.ANDROID)
         )
-        assertNull(SharedFileCapabilities.surfaceFor(FileType.PPTX, ReaderPlatform.DESKTOP))
+        assertEquals(
+            ReaderFeatureSurface.PDF_VIEWER,
+            SharedFileCapabilities.surfaceFor(FileType.PPTX, ReaderPlatform.DESKTOP)
+        )
         assertEquals(
             ReaderFeatureSurface.TEXT_READER,
             SharedFileCapabilities.surfaceFor(FileType.MD, ReaderPlatform.DESKTOP)
@@ -94,12 +109,32 @@ class FileCapabilitiesTest {
     }
 
     @Test
+    fun `shared metadata resolver handles provider mime types and guarded archive fallbacks`() {
+        assertEquals(FileType.PDF, SharedFileCapabilities.resolveFileTypeForMetadata("download", "application/pdf"))
+        assertEquals(
+            FileType.DOCX,
+            SharedFileCapabilities.resolveFileTypeForMetadata(
+                "download",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+        )
+        assertEquals(
+            FileType.MD,
+            SharedFileCapabilities.resolveFileTypeForMetadata("notes.md.txt", "text/plain; charset=utf-8")
+        )
+        assertEquals(FileType.HTML, SharedFileCapabilities.resolveFileTypeForMetadata("payload", "application/json"))
+        assertEquals(FileType.CBZ, SharedFileCapabilities.resolveFileTypeForMetadata("comic.cbz", "application/zip"))
+        assertEquals(FileType.FB2, SharedFileCapabilities.resolveFileTypeForMetadata("book.fb2.zip", "application/zip"))
+        assertNull(SharedFileCapabilities.resolveFileTypeForMetadata("archive.zip", "application/zip"))
+    }
+
+    @Test
     fun `shared file name policy detects manual only files and suffixes`() {
         assertTrue(SharedFileCapabilities.isCodeOrDataFileName("table.csv"))
         assertTrue(SharedFileCapabilities.isManualOnlyReaderFileName("script.kt.txt"))
         assertFalse(SharedFileCapabilities.isManualOnlyReaderFileName("chapter.html"))
         assertFalse(SharedFileCapabilities.isLocalFolderSyncEligibleFile("table.csv", "text/csv"))
-        assertFalse(SharedFileCapabilities.isLocalFolderSyncEligibleFile("payload", "application/json"))
+        assertFalse(SharedFileCapabilities.isLocalFolderSyncEligibleFile("payload", "application/json; charset=utf-8"))
         assertTrue(SharedFileCapabilities.isLocalFolderSyncEligibleFile("book.fodt", "text/xml"))
         assertEquals(".md.txt", SharedFileCapabilities.fileExtensionSuffixForName("notes.md.txt"))
         assertEquals(".fb2.zip.txt", SharedFileCapabilities.fileExtensionSuffixForName("book.fb2.zip.txt"))
@@ -107,6 +142,6 @@ class FileCapabilitiesTest {
 
     @Test
     fun `desktop parity gaps list Android readable formats not yet available on desktop`() {
-        assertEquals(listOf(FileType.PPTX), SharedFileCapabilities.desktopParityGaps())
+        assertEquals(emptyList(), SharedFileCapabilities.desktopParityGaps())
     }
 }

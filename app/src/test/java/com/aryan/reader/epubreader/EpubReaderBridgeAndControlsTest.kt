@@ -10,6 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -179,6 +180,24 @@ class EpubReaderBridgeAndControlsTest {
     }
 
     @Test
+    fun `web view hit test guard treats chromium null state as unknown tap`() {
+        val type = readWebViewHitTestTypeOrNull {
+            throw NullPointerException("chromium hit test result missing")
+        }
+
+        assertNull(type)
+        assertFalse(isWebViewAnchorHitTestType(type))
+    }
+
+    @Test
+    fun `web view hit test helper detects anchor result types`() {
+        assertTrue(isWebViewAnchorHitTestType(WebView.HitTestResult.SRC_ANCHOR_TYPE))
+        assertTrue(isWebViewAnchorHitTestType(WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE))
+        assertFalse(isWebViewAnchorHitTestType(null))
+        assertFalse(isWebViewAnchorHitTestType(WebView.HitTestResult.IMAGE_TYPE))
+    }
+
+    @Test
     fun `initiateTtsPlayback chooses web extraction for vertical mode and callback for paginated mode`() {
         val webView = mockk<WebView>(relaxed = true)
         var paginatedStarts = 0
@@ -197,11 +216,15 @@ class EpubReaderBridgeAndControlsTest {
         assertTrue(ReaderTool.entries.any { it.category == "Bottom Bar" })
         assertTrue(ReaderTool.entries.any { it.category == "Overflow Menu" })
         assertEquals("Top Bar", ReaderTool.SCREEN_ORIENTATION.category)
+        assertEquals("Top Bar", ReaderTool.BRIGHTNESS.category)
     }
 
     @Test
     fun `reader toolbar reset defaults match first-run toolbar defaults`() {
-        assertEquals(setOf(ReaderTool.SCREEN_ORIENTATION.name), defaultReaderHiddenTools())
+        assertEquals(
+            setOf(ReaderTool.SCREEN_ORIENTATION.name, ReaderTool.BRIGHTNESS.name),
+            defaultReaderHiddenTools()
+        )
         assertEquals(ReaderTool.entries.toList(), defaultReaderToolOrder())
         assertEquals(
             ReaderTool.entries.filter { it.category == "Bottom Bar" }.map { it.name }.toSet(),
@@ -219,8 +242,60 @@ class EpubReaderBridgeAndControlsTest {
             defaultItems.single { it.tool == ReaderTool.SCREEN_ORIENTATION }.section
         )
         assertEquals(
+            ToolbarSection.HIDDEN,
+            defaultItems.single { it.tool == ReaderTool.BRIGHTNESS }.section
+        )
+        assertEquals(
             ToolbarSection.BOTTOM,
             defaultItems.single { it.tool == ReaderTool.SLIDER }.section
         )
+        assertTrue(defaultItems.any { it.type == FlatItemType.MORE_TOOL && it.tool == ReaderTool.FILE_INFO })
+    }
+
+    @Test
+    fun `epub overflow sections end at auto scroll when tts submenu and file info are hidden`() {
+        val sections = epubOverflowMenuSections(
+            hiddenTools = setOf(
+                ReaderTool.TTS_SETTINGS.name,
+                ReaderTool.TTS_REPLACEMENTS.name
+            ),
+            hasHiddenToolbarTools = false,
+            hasToggleReflow = false,
+            hasDeleteReflow = false,
+            hasFileInfo = false
+        )
+
+        assertEquals(EpubOverflowMenuSection.AUTO_SCROLL, sections.last())
+        assertTrue(EpubOverflowMenuSection.TTS_SETTINGS !in sections)
+    }
+
+    @Test
+    fun `epub overflow sections expose file info only when available and visible`() {
+        val visibleSections = epubOverflowMenuSections(
+            hiddenTools = emptySet(),
+            hasHiddenToolbarTools = false,
+            hasToggleReflow = false,
+            hasDeleteReflow = false,
+            hasFileInfo = true
+        )
+        val missingItemSections = epubOverflowMenuSections(
+            hiddenTools = emptySet(),
+            hasHiddenToolbarTools = false,
+            hasToggleReflow = false,
+            hasDeleteReflow = false,
+            hasFileInfo = false
+        )
+        val hiddenSections = epubOverflowMenuSections(
+            hiddenTools = setOf(ReaderTool.FILE_INFO.name),
+            hasHiddenToolbarTools = false,
+            hasToggleReflow = false,
+            hasDeleteReflow = false,
+            hasFileInfo = true
+        )
+
+        assertTrue(EpubOverflowMenuSection.FILE_INFO in visibleSections)
+        assertEquals(EpubOverflowMenuSection.FILE_INFO, visibleSections.last())
+        assertFalse(EpubOverflowMenuSection.FILE_INFO in missingItemSections)
+        assertFalse(EpubOverflowMenuSection.FILE_INFO in hiddenSections)
     }
 }

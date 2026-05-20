@@ -6,6 +6,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import com.aryan.reader.epubreader.SystemUiMode
+import com.aryan.reader.shared.reader.ReaderPageSpreadMode
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertEquals
@@ -26,13 +27,19 @@ class PdfReaderPreferencesTest {
         val context = contextWithPrefs(prefs)
 
         val order = loadPdfToolOrder(context)
+        val expectedTools = PdfReaderTool.entries.filter(::isPdfReaderToolAvailable)
 
         assertEquals(listOf(PdfReaderTool.SEARCH, PdfReaderTool.TOC), order.take(2))
-        assertEquals(PdfReaderTool.entries.size, order.size)
-        assertEquals(PdfReaderTool.entries.toSet(), order.toSet())
+        assertEquals(expectedTools.size, order.size)
+        assertEquals(expectedTools.toSet(), order.toSet())
         assertEquals(setOf(PdfReaderTool.SEARCH.name, PdfReaderTool.TOC.name), loadPdfBottomTools(context))
         assertEquals(
-            setOf(PdfReaderTool.PRINT.name, PdfReaderTool.SCREEN_ORIENTATION.name, PdfReaderTool.HIGHLIGHT_ALL.name),
+            setOf(
+                PdfReaderTool.PRINT.name,
+                PdfReaderTool.SCREEN_ORIENTATION.name,
+                PdfReaderTool.HIGHLIGHT_ALL.name,
+                PdfReaderTool.BRIGHTNESS.name
+            ),
             loadPdfHiddenTools(context)
         )
     }
@@ -49,6 +56,7 @@ class PdfReaderPreferencesTest {
         assertEquals(setOf(PdfReaderTool.PRINT.name, PdfReaderTool.SHARE.name), loadPdfHiddenTools(context))
         assertFalse(PdfReaderTool.SCREEN_ORIENTATION.name in loadPdfHiddenTools(context))
         assertFalse(PdfReaderTool.HIGHLIGHT_ALL.name in loadPdfHiddenTools(context))
+        assertFalse(PdfReaderTool.BRIGHTNESS.name in loadPdfHiddenTools(context))
         assertEquals(setOf(PdfReaderTool.SEARCH.name), loadPdfBottomTools(context))
         assertEquals(listOf(PdfReaderTool.TOC, PdfReaderTool.SEARCH), loadPdfToolOrder(context).take(2))
     }
@@ -61,7 +69,8 @@ class PdfReaderPreferencesTest {
             DOCK_OFFSET_X_KEY to 12.5f,
             DOCK_OFFSET_Y_KEY to -7.25f,
             OCR_LANGUAGE_KEY to "UNKNOWN",
-            PDF_SYSTEM_UI_MODE_KEY to Int.MIN_VALUE
+            PDF_SYSTEM_UI_MODE_KEY to Int.MIN_VALUE,
+            PDF_PAGE_SPREAD_MODE_KEY to "SIDEWAYS"
         )
         val context = contextWithPrefs(prefs)
 
@@ -69,6 +78,7 @@ class PdfReaderPreferencesTest {
         assertEquals(DockLocation.BOTTOM to Offset(12.5f, -7.25f), loadDockState(context))
         assertEquals(OcrLanguage.LATIN, loadOcrLanguage(context))
         assertEquals(SystemUiMode.SYNC, loadPdfSystemUiMode(context))
+        assertEquals(ReaderPageSpreadMode.SINGLE, loadPdfPageSpreadMode(context))
         assertFalse(hasUserSelectedOcrLanguage(context))
     }
 
@@ -81,12 +91,16 @@ class PdfReaderPreferencesTest {
         saveDockState(context, DockLocation.FLOATING, Offset(3f, 4f))
         saveOcrLanguage(context, OcrLanguage.JAPANESE)
         savePdfSystemUiMode(context, SystemUiMode.HIDDEN)
+        savePdfPageSpreadMode(context, ReaderPageSpreadMode.TWO_PAGE)
+        savePdfFirstPageStandaloneInSpread(context, true)
 
         assertEquals(DisplayMode.PAGINATION, loadDisplayMode(context))
         assertEquals(DockLocation.FLOATING to Offset(3f, 4f), loadDockState(context))
         assertEquals(OcrLanguage.JAPANESE, loadOcrLanguage(context))
         assertTrue(hasUserSelectedOcrLanguage(context))
         assertEquals(SystemUiMode.HIDDEN, loadPdfSystemUiMode(context))
+        assertEquals(ReaderPageSpreadMode.TWO_PAGE, loadPdfPageSpreadMode(context))
+        assertTrue(loadPdfFirstPageStandaloneInSpread(context))
     }
 
     @Test
@@ -94,8 +108,11 @@ class PdfReaderPreferencesTest {
         val prefs = InMemorySharedPreferences()
         val context = contextWithPrefs(prefs)
 
+        assertTrue(loadPdfTopTabStripVisible(context))
+
         savePdfThemeId(context, "sepia")
         saveKeepScreenOn(context, true)
+        savePdfTopTabStripVisible(context, false)
         saveUseOnlineDict(context, false)
         saveExternalDictPackage(context, "com.example.dict")
         saveExternalTranslatePackage(context, "com.example.translate")
@@ -108,6 +125,7 @@ class PdfReaderPreferencesTest {
 
         assertEquals("sepia", loadPdfThemeId(context))
         assertTrue(loadKeepScreenOn(context))
+        assertFalse(loadPdfTopTabStripVisible(context))
         assertFalse(loadUseOnlineDict(context))
         assertEquals("com.example.dict", loadExternalDictPackage(context))
         assertEquals("com.example.translate", loadExternalTranslatePackage(context))

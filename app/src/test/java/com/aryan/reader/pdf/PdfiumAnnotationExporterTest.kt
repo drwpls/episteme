@@ -7,6 +7,7 @@ import androidx.compose.ui.graphics.toArgb
 import com.aryan.reader.pdf.data.PdfAnnotation
 import com.aryan.reader.pdf.data.PdfTextBox
 import com.aryan.reader.pdf.data.VirtualPage
+import com.aryan.reader.shared.pdf.SharedPdfAnnotationComment
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -19,7 +20,7 @@ import org.robolectric.RobolectricTestRunner
 class PdfiumAnnotationExporterTest {
 
     @Test
-    fun `buildPayload flattens ink annotations and skips unsupported ink tools`() {
+    fun `buildPayload flattens ink annotations and skips unsupported ink and text annotations`() {
         val payload = PdfiumAnnotationExporter.buildPayload(
             inkAnnotations = mapOf(
                 2 to listOf(
@@ -29,13 +30,22 @@ class PdfiumAnnotationExporterTest {
                         pageIndex = 99,
                         points = listOf(PdfPoint(0.1f, 0.2f), PdfPoint(0.3f, 0.4f)),
                         color = Color(0xFF336699),
-                        strokeWidth = 0.0125f
+                        strokeWidth = 0.0125f,
+                        id = "ink-1"
                     ),
                     PdfAnnotation(
                         type = AnnotationType.INK,
                         inkType = InkType.ERASER,
                         pageIndex = 2,
                         points = listOf(PdfPoint(0.5f, 0.6f), PdfPoint(0.7f, 0.8f)),
+                        color = Color.Black,
+                        strokeWidth = 0.1f
+                    ),
+                    PdfAnnotation(
+                        type = AnnotationType.TEXT,
+                        inkType = InkType.PEN,
+                        pageIndex = 2,
+                        points = listOf(PdfPoint(0.2f, 0.3f), PdfPoint(0.4f, 0.5f)),
                         color = Color.Black,
                         strokeWidth = 0.1f
                     )
@@ -52,10 +62,36 @@ class PdfiumAnnotationExporterTest {
         assertArrayEquals(intArrayOf(0), payload.inkPointOffsets)
         assertArrayEquals(intArrayOf(2), payload.inkPointCounts)
         assertArrayEquals(floatArrayOf(0.1f, 0.2f, 0.3f, 0.4f), payload.inkPoints, 0.0001f)
+        assertEquals("", payload.inkContents.single())
+        assertEquals("ink-1", payload.inkNames.single())
     }
 
     @Test
-    fun `buildPayload preserves highlight pdf rects and content notes`() {
+    fun `buildPayload trims chisel highlighter endpoints for pdf ink caps`() {
+        val payload = PdfiumAnnotationExporter.buildPayload(
+            inkAnnotations = mapOf(
+                0 to listOf(
+                    PdfAnnotation(
+                        type = AnnotationType.INK,
+                        inkType = InkType.HIGHLIGHTER,
+                        pageIndex = 0,
+                        points = listOf(PdfPoint(0.1f, 0.2f), PdfPoint(0.9f, 0.2f)),
+                        color = Color(0x8CFFEB3B.toInt()),
+                        strokeWidth = 0.1f,
+                        id = "highlighter"
+                    )
+                )
+            ),
+            textBoxes = emptyList(),
+            highlights = emptyList(),
+            pageSizes = listOf(PdfiumPageSize(width = 100, height = 100))
+        )
+
+        assertArrayEquals(floatArrayOf(0.165f, 0.2f, 0.835f, 0.2f), payload.inkPoints, 0.0001f)
+    }
+
+    @Test
+    fun `buildPayload normalizes highlight rects and preserves names and content notes`() {
         val payload = PdfiumAnnotationExporter.buildPayload(
             inkAnnotations = emptyMap(),
             textBoxes = emptyList(),
@@ -67,8 +103,27 @@ class PdfiumAnnotationExporterTest {
                     color = PdfHighlightColor.BLUE,
                     text = "Selected text",
                     range = 0 to 13,
-                    note = "Important"
+                    note = "Important",
+                    comments = listOf(
+                        SharedPdfAnnotationComment(
+                            id = "comment-1",
+                            author = "Ada",
+                            contents = "First comment",
+                            createdAt = 1_700_000_000_000L,
+                            modifiedAt = 1_700_000_010_000L
+                        ),
+                        SharedPdfAnnotationComment(
+                            id = "comment-2",
+                            author = "Bea",
+                            contents = "Second top-level comment",
+                            createdAt = 1_700_000_020_000L
+                        )
+                    )
                 )
+            ),
+            pageSizes = listOf(
+                PdfiumPageSize(width = 612, height = 792),
+                PdfiumPageSize(width = 100, height = 100)
             )
         )
 
@@ -77,11 +132,23 @@ class PdfiumAnnotationExporterTest {
         assertArrayEquals(intArrayOf(0), payload.highlightRectOffsets)
         assertArrayEquals(intArrayOf(2), payload.highlightRectCounts)
         assertArrayEquals(
-            floatArrayOf(10f, 90f, 40f, 80f, 50f, 70f, 60f, 65f),
+            floatArrayOf(0.1f, 0.1f, 0.4f, 0.2f, 0.5f, 0.3f, 0.6f, 0.35f),
             payload.highlightRects,
             0.0001f
         )
+        assertEquals("highlight-1", payload.highlightNames.single())
         assertEquals("Important", payload.highlightContents.single())
+        assertArrayEquals(intArrayOf(0), payload.highlightCommentOffsets)
+        assertArrayEquals(intArrayOf(1), payload.highlightCommentCounts)
+        assertArrayEquals(intArrayOf(-1), payload.highlightCommentParentIndices)
+        assertEquals(listOf("highlight-1_comments"), payload.highlightCommentNames.toList())
+        assertEquals(listOf("Ada"), payload.highlightCommentAuthors.toList())
+        assertEquals(
+            listOf("Ada:\nFirst comment\n\nBea:\nSecond top-level comment"),
+            payload.highlightCommentContents.toList()
+        )
+        assertEquals("D:20231114221320Z", payload.highlightCommentCreatedDates[0])
+        assertEquals("D:20231114221340Z", payload.highlightCommentModifiedDates[0])
     }
 
     @Test

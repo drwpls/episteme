@@ -8,9 +8,9 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.edit
 import com.aryan.reader.BuildConfig
 import com.aryan.reader.R
-import com.aryan.reader.ReaderTheme
-import com.aryan.reader.ReaderTexture
 import com.aryan.reader.epubreader.SystemUiMode
+import com.aryan.reader.shared.BuiltInPdfReaderThemes
+import com.aryan.reader.shared.reader.ReaderPageSpreadMode
 
 internal const val VERTICAL_SCROLL_TAG = "PdfVerticalScroll"
 internal const val SETTINGS_PREFS_NAME = "epub_reader_settings"
@@ -33,7 +33,6 @@ private const val PDF_AUTO_SCROLL_LOCAL_SPEED_PREFIX = "pdf_as_local_speed_"
 private const val PDF_AUTO_SCROLL_LOCAL_MIN_PREFIX = "pdf_as_local_min_"
 private const val PDF_AUTO_SCROLL_LOCAL_MAX_PREFIX = "pdf_as_local_max_"
 private const val PDF_SCROLL_LOCKED_PREFIX = "pdf_sl_local_"
-internal const val PDF_FULL_SCREEN_PREFIX = "pdf_fs_local_"
 private const val PDF_MUSICIAN_MODE_KEY = "pdf_musician_mode_enabled"
 private const val PREF_USE_ONLINE_DICT = "use_online_dictionary"
 private const val PREF_EXTERNAL_DICT_PKG = "external_dictionary_package"
@@ -47,17 +46,21 @@ internal const val PDF_BOTTOM_TOOLS_KEY = "pdf_bottom_tools"
 internal const val PDF_SYSTEM_UI_MODE_KEY = "pdf_system_ui_mode"
 internal const val PDF_VERTICAL_PAGE_GAP_VISIBLE_KEY = "pdf_vertical_page_gap_visible"
 internal const val PDF_PAGE_NUMBER_OVERLAY_VISIBLE_KEY = "pdf_page_number_overlay_visible"
+internal const val PDF_TOP_TAB_STRIP_VISIBLE_KEY = "pdf_top_tab_strip_visible"
+internal const val PDF_PAGE_SPREAD_MODE_KEY = "pdf_page_spread_mode"
+internal const val PDF_FIRST_PAGE_STANDALONE_IN_SPREAD_KEY = "pdf_first_page_standalone_in_spread"
 internal const val PDF_LAYOUT_DEBUG_TAG = "PdfLayoutDebug"
 private const val PDF_HIDDEN_TOOLS_DEFAULTS_VERSION_KEY = "pdf_hidden_tools_defaults_version"
-private const val PDF_HIDDEN_TOOLS_DEFAULTS_VERSION = 2
+private const val PDF_HIDDEN_TOOLS_DEFAULTS_VERSION = 3
 
 enum class PdfReaderTool(@StringRes val titleRes: Int, val category: String) {
     DICTIONARY(R.string.tool_external_apps, "Top Bar"),
     THEME(R.string.tooltip_theme_desc, "Top Bar"),
+    BRIGHTNESS(R.string.tool_brightness, "Top Bar"),
     LOCK_PANNING(R.string.tooltip_lock_pan, "Top Bar"),
+    FILE_INFO(R.string.file_information, "Overflow Menu"),
     VISUAL_OPTIONS(R.string.menu_visual_options, "Overflow Menu"),
     TAP_TO_TURN(R.string.menu_tap_to_turn_pages, "Overflow Menu"),
-    FULL_SCREEN(R.string.tooltip_fullscreen, "Top Bar"),
     SLIDER(R.string.tool_navigation_slider, "Bottom Bar"),
     TOC(R.string.tool_sidebar, "Bottom Bar"),
     SEARCH(R.string.action_search, "Bottom Bar"),
@@ -83,38 +86,41 @@ enum class PdfReaderTool(@StringRes val titleRes: Int, val category: String) {
 internal fun defaultPdfHiddenTools(): Set<String> {
     return setOf(
         PdfReaderTool.SCREEN_ORIENTATION.name,
-        PdfReaderTool.HIGHLIGHT_ALL.name
+        PdfReaderTool.HIGHLIGHT_ALL.name,
+        PdfReaderTool.BRIGHTNESS.name
     )
 }
 
-internal fun defaultPdfToolOrder(): List<PdfReaderTool> = PdfReaderTool.entries.toList()
-
-internal fun defaultPdfBottomTools(): Set<String> {
-    return PdfReaderTool.entries.filter { it.category == "Bottom Bar" }.map { it.name }.toSet()
+internal fun isPdfReaderToolAvailable(tool: PdfReaderTool): Boolean {
+    return BuildConfig.IS_PRO || tool != PdfReaderTool.OCR_LANGUAGE
 }
 
-val PdfBuiltInThemes = listOf(
-    ReaderTheme("no_theme", "No Theme", Color.Unspecified, Color.Unspecified, false),
-    ReaderTheme("reverse", "Reverse", Color.Black, Color.White, true),
-    ReaderTheme("light", "Light", Color(0xFFFFFFFF), Color(0xFF000000), false),
-    ReaderTheme("dark", "Dark", Color(0xFF121212), Color(0xFFE0E0E0), true),
-    ReaderTheme("sepia", "Sepia", Color(0xFFFBF0D9), Color(0xFF5F4B32), false),
-    ReaderTheme("slate", "Slate", Color(0xFF2E3440), Color(0xFFECEFF4), true),
-    ReaderTheme("oled", "OLED", Color(0xFF000000), Color(0xFFB0B0B0), true),
-    ReaderTheme("pdf_natural_white_texture", "Natural White", Color(0xFFF7F1E5), Color(0xFF1D1B18), false, textureId = ReaderTexture.NATURAL_WHITE.id),
-    ReaderTheme("pdf_retina_texture", "Retina", Color(0xFFF1E4CD), Color(0xFF2A2119), false, textureId = ReaderTexture.RETINA_WOOD.id),
-    ReaderTheme("pdf_veneer_texture", "Veneer", Color(0xFFF4E7CF), Color(0xFF2A2119), false, textureId = ReaderTexture.LIGHT_VENEER.id),
-    ReaderTheme("pdf_grey_wash_texture", "Grey Wash", Color(0xFF202124), Color(0xFFFFFFFF), true, textureId = ReaderTexture.GREY_WASH.id),
-    ReaderTheme("pdf_fabric_texture", "Fabric", Color(0xFF262626), Color(0xFFE8E2D8), true, textureId = ReaderTexture.CLASSY_FABRIC.id),
-    ReaderTheme("pdf_retro_texture", "Retro", Color(0xFFF6ECD8), Color(0xFF2F2118), false, textureId = ReaderTexture.RETRO_INTRO.id)
-)
+internal fun defaultPdfToolOrder(): List<PdfReaderTool> = PdfReaderTool.entries.filter(::isPdfReaderToolAvailable)
+
+internal fun defaultPdfBottomTools(): Set<String> {
+    return defaultPdfToolOrder().filter { it.category == "Bottom Bar" }.map { it.name }.toSet()
+}
+
+val PdfBuiltInThemes = BuiltInPdfReaderThemes
+
+private fun sanitizePdfToolNameSet(
+    toolNames: Set<String>,
+    includeTool: (PdfReaderTool) -> Boolean = { true }
+): Set<String> {
+    return toolNames.mapNotNull { toolName ->
+        PdfReaderTool.entries
+            .firstOrNull { it.name == toolName }
+            ?.takeIf { isPdfReaderToolAvailable(it) && includeTool(it) }
+            ?.name
+    }.toSet()
+}
 
 internal fun loadPdfHiddenTools(context: Context): Set<String> {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
-    val savedHiddenTools = prefs.getStringSet(PDF_HIDDEN_TOOLS_KEY, emptySet()).orEmpty()
+    val savedHiddenTools = sanitizePdfToolNameSet(prefs.getStringSet(PDF_HIDDEN_TOOLS_KEY, emptySet()).orEmpty())
     val defaultsVersion = prefs.getInt(PDF_HIDDEN_TOOLS_DEFAULTS_VERSION_KEY, 0)
     if (defaultsVersion < PDF_HIDDEN_TOOLS_DEFAULTS_VERSION) {
-        val migratedHiddenTools = savedHiddenTools + defaultPdfHiddenTools()
+        val migratedHiddenTools = sanitizePdfToolNameSet(savedHiddenTools + pdfHiddenToolsIntroducedAfter(defaultsVersion))
         prefs.edit {
             putStringSet(PDF_HIDDEN_TOOLS_KEY, migratedHiddenTools)
             putInt(PDF_HIDDEN_TOOLS_DEFAULTS_VERSION_KEY, PDF_HIDDEN_TOOLS_DEFAULTS_VERSION)
@@ -124,10 +130,20 @@ internal fun loadPdfHiddenTools(context: Context): Set<String> {
     return savedHiddenTools
 }
 
+private fun pdfHiddenToolsIntroducedAfter(defaultsVersion: Int): Set<String> {
+    return buildSet {
+        if (defaultsVersion < 2) {
+            add(PdfReaderTool.SCREEN_ORIENTATION.name)
+            add(PdfReaderTool.HIGHLIGHT_ALL.name)
+        }
+        if (defaultsVersion < 3) add(PdfReaderTool.BRIGHTNESS.name)
+    }
+}
+
 internal fun savePdfHiddenTools(context: Context, hiddenTools: Set<String>) {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
     prefs.edit {
-        putStringSet(PDF_HIDDEN_TOOLS_KEY, hiddenTools)
+        putStringSet(PDF_HIDDEN_TOOLS_KEY, sanitizePdfToolNameSet(hiddenTools))
         putInt(PDF_HIDDEN_TOOLS_DEFAULTS_VERSION_KEY, PDF_HIDDEN_TOOLS_DEFAULTS_VERSION)
     }
 }
@@ -138,24 +154,41 @@ internal fun loadPdfToolOrder(context: Context): List<PdfReaderTool> {
         ?.split(',')
         ?.filter { it.isNotBlank() }
         ?.mapNotNull { name -> PdfReaderTool.entries.firstOrNull { it.name == name } }
+        ?.filter(::isPdfReaderToolAvailable)
         .orEmpty()
     return (savedTools + defaultPdfToolOrder().filterNot { it in savedTools }).distinct()
 }
 
 internal fun savePdfToolOrder(context: Context, toolOrder: List<PdfReaderTool>) {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
-    prefs.edit { putString(PDF_TOOL_ORDER_KEY, toolOrder.joinToString(",") { it.name }) }
+    prefs.edit {
+        putString(
+            PDF_TOOL_ORDER_KEY,
+            toolOrder.filter(::isPdfReaderToolAvailable).joinToString(",") { it.name }
+        )
+    }
 }
 
 internal fun loadPdfBottomTools(context: Context): Set<String> {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
     val defaultBottomTools = defaultPdfBottomTools()
-    return prefs.getStringSet(PDF_BOTTOM_TOOLS_KEY, defaultBottomTools) ?: defaultBottomTools
+    return sanitizePdfToolNameSet(
+        toolNames = prefs.getStringSet(PDF_BOTTOM_TOOLS_KEY, defaultBottomTools) ?: defaultBottomTools,
+        includeTool = { it.category == "Bottom Bar" }
+    )
 }
 
 internal fun savePdfBottomTools(context: Context, bottomTools: Set<String>) {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
-    prefs.edit { putStringSet(PDF_BOTTOM_TOOLS_KEY, bottomTools) }
+    prefs.edit {
+        putStringSet(
+            PDF_BOTTOM_TOOLS_KEY,
+            sanitizePdfToolNameSet(
+                toolNames = bottomTools,
+                includeTool = { it.category == "Bottom Bar" }
+            )
+        )
+    }
 }
 
 internal fun loadCustomHighlightColors(context: Context): Map<PdfHighlightColor, Color> {
@@ -215,6 +248,38 @@ internal fun savePdfPageNumberOverlayVisible(context: Context, isVisible: Boolea
 internal fun loadPdfPageNumberOverlayVisible(context: Context): Boolean {
     val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
     return prefs.getBoolean(PDF_PAGE_NUMBER_OVERLAY_VISIBLE_KEY, true)
+}
+
+internal fun savePdfPageSpreadMode(context: Context, mode: ReaderPageSpreadMode) {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit { putString(PDF_PAGE_SPREAD_MODE_KEY, mode.name) }
+}
+
+internal fun loadPdfPageSpreadMode(context: Context): ReaderPageSpreadMode {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    val modeName = prefs.getString(PDF_PAGE_SPREAD_MODE_KEY, ReaderPageSpreadMode.SINGLE.name)
+    return runCatching { ReaderPageSpreadMode.valueOf(modeName ?: ReaderPageSpreadMode.SINGLE.name) }
+        .getOrDefault(ReaderPageSpreadMode.SINGLE)
+}
+
+internal fun savePdfFirstPageStandaloneInSpread(context: Context, isEnabled: Boolean) {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit { putBoolean(PDF_FIRST_PAGE_STANDALONE_IN_SPREAD_KEY, isEnabled) }
+}
+
+internal fun loadPdfFirstPageStandaloneInSpread(context: Context): Boolean {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    return prefs.getBoolean(PDF_FIRST_PAGE_STANDALONE_IN_SPREAD_KEY, false)
+}
+
+internal fun savePdfTopTabStripVisible(context: Context, isVisible: Boolean) {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit { putBoolean(PDF_TOP_TAB_STRIP_VISIBLE_KEY, isVisible) }
+}
+
+internal fun loadPdfTopTabStripVisible(context: Context): Boolean {
+    val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    return prefs.getBoolean(PDF_TOP_TAB_STRIP_VISIBLE_KEY, true)
 }
 
 internal fun savePdfThemeId(context: Context, themeId: String) {

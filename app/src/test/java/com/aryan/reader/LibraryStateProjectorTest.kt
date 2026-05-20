@@ -499,6 +499,70 @@ class LibraryStateProjectorTest {
         assertEquals(listOf("folder_book"), folderShelf.directBooks.ids())
     }
 
+    @Test
+    fun `project preserves app font preference when reusing cached library projection`() {
+        val book = recentFile("book")
+        val projector = LibraryStateProjector()
+        val input = LibraryProjectionInput(
+            state = ReaderScreenState(),
+            recentFilesFromDb = listOf(book),
+            dbShelves = emptyList(),
+            shelfRefs = emptyList(),
+            dbTags = emptyList(),
+            tagRefs = emptyList()
+        )
+
+        projector.project(input)
+        val result = projector.project(
+            input.copy(state = input.state.copy(appFontPreference = AppFontPreference.Monospace))
+        )
+
+        assertEquals(AppFontPreference.Monospace, result.appFontPreference)
+    }
+
+    @Test
+    fun `project preserves pdf filename display preference when reusing cached library projection`() {
+        val book = recentFile("book")
+        val projector = LibraryStateProjector()
+        val input = LibraryProjectionInput(
+            state = ReaderScreenState(),
+            recentFilesFromDb = listOf(book),
+            dbShelves = emptyList(),
+            shelfRefs = emptyList(),
+            dbTags = emptyList(),
+            tagRefs = emptyList()
+        )
+
+        projector.project(input)
+        val result = projector.project(
+            input.copy(state = input.state.copy(usePdfFileNameAsDisplayName = true))
+        )
+
+        assertTrue(result.usePdfFileNameAsDisplayName)
+    }
+
+    @Test
+    fun `cardTitle can prefer PDF filename over embedded metadata title`() {
+        val pdf = recentFile(
+            id = "pdf",
+            type = FileType.PDF,
+            displayName = "file-name.pdf",
+            title = "Metadata title"
+        )
+        val renamedPdf = pdf.copy(customName = "Manual name")
+        val epub = recentFile(
+            id = "epub",
+            type = FileType.EPUB,
+            displayName = "book.epub",
+            title = "EPUB title"
+        )
+
+        assertEquals("Metadata title", pdf.cardTitle())
+        assertEquals("file-name.pdf", pdf.cardTitle(usePdfFileNameAsDisplayName = true))
+        assertEquals("Manual name", renamedPdf.cardTitle(usePdfFileNameAsDisplayName = true))
+        assertEquals("EPUB title", epub.cardTitle(usePdfFileNameAsDisplayName = true))
+    }
+
     private fun recentFile(
         id: String,
         uriString: String? = "content://$id",

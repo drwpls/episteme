@@ -2043,6 +2043,56 @@
         `);
     }
 
+    function parseReaderChunkInt(value, fallback) {
+        const parsed = parseInt(value, 10);
+        return isNaN(parsed) ? fallback : parsed;
+    }
+
+    function getReaderChunkIndex(chunkElement) {
+        return parseReaderChunkInt(chunkElement && chunkElement.dataset ? chunkElement.dataset.chunkIndex : null, 0);
+    }
+
+    function getReaderChunkElementStartIndex(chunkElement) {
+        const chunkIndex = getReaderChunkIndex(chunkElement);
+        return parseReaderChunkInt(
+            chunkElement && chunkElement.dataset ? chunkElement.dataset.elementStartIndex : null,
+            chunkIndex * 20
+        );
+    }
+
+    function getReaderChunkElementCount(chunkElement) {
+        return parseReaderChunkInt(
+            chunkElement && chunkElement.dataset ? chunkElement.dataset.elementCount : null,
+            20
+        );
+    }
+
+    function findReaderChunkForElementIndex(container, childNodeIndex) {
+        const chunks = Array.from(container.querySelectorAll(".chunk-container"));
+        for (let i = 0; i < chunks.length; i++) {
+            const chunkElement = chunks[i];
+            const elementStartIndex = getReaderChunkElementStartIndex(chunkElement);
+            const elementCount = getReaderChunkElementCount(chunkElement);
+            if (elementCount <= 0) continue;
+            if (childNodeIndex >= elementStartIndex && childNodeIndex < elementStartIndex + elementCount) {
+                return {
+                    chunkElement: chunkElement,
+                    chunkIndex: getReaderChunkIndex(chunkElement),
+                    indexInChunk: childNodeIndex - elementStartIndex
+                };
+            }
+        }
+
+        const fallbackChunkIndex = Math.floor(childNodeIndex / 20);
+        const fallbackChunkElement = container.querySelector(`.chunk-container[data-chunk-index="${fallbackChunkIndex}"]`);
+        if (!fallbackChunkElement) return null;
+        return {
+            chunkElement: fallbackChunkElement,
+            chunkIndex: fallbackChunkIndex,
+            indexInChunk: childNodeIndex % 20
+        };
+    }
+
     function resolveCfiPath(rootElement, path, requestChunkIfMissing = false) {
         let currentNode = rootElement;
         const steps = path.substring(1).split("/").map(Number);
@@ -2054,10 +2104,12 @@
             // Handle virtualized content container specially
             if (currentNode.id === 'content-container') {
                 const childNodeIndex = (cfiIndex - 2) / 2;
-                let chunkIndex = Math.floor(childNodeIndex / 20);
-                let indexInChunk = childNodeIndex % 20;
+                const chunkLookup = findReaderChunkForElementIndex(currentNode, childNodeIndex);
+                if (!chunkLookup) return null;
 
-                let chunkElement = currentNode.querySelector(`.chunk-container[data-chunk-index="${chunkIndex}"]`);
+                let chunkIndex = chunkLookup.chunkIndex;
+                let indexInChunk = chunkLookup.indexInChunk;
+                let chunkElement = chunkLookup.chunkElement;
                 if (chunkElement) {
                     if (chunkElement.innerHTML === "") {
                         if (window.virtualization && window.virtualization.chunksData[chunkIndex]) {
@@ -2179,8 +2231,8 @@
                         continue;
                     }
 
-                    let chunkIndex = parseInt(parentNode.dataset.chunkIndex, 10);
-                    let elementsInPrecedingChunks = chunkIndex * 20;
+                    let chunkIndex = getReaderChunkIndex(parentNode);
+                    let elementsInPrecedingChunks = getReaderChunkElementStartIndex(parentNode);
 
                     let trueIndex = elementsInPrecedingChunks + indexInChunk;
                     let cfiIndex = trueIndex * 2 + 2;
@@ -2294,6 +2346,119 @@
     function logBm(msg) {
         console.log(TAG_BM + ": " + msg);
     }
+
+    function normalizeReaderImageSourceForMatch(value) {
+        if (!value) return "";
+        var normalized = String(value).split("#")[0].split("?")[0].replace(/\\/g, "/");
+        try {
+            normalized = decodeURIComponent(normalized);
+        } catch (e) {}
+        if (normalized.indexOf("file://") === 0) {
+            normalized = normalized.substring("file://".length);
+        }
+        return normalized.toLowerCase();
+    }
+
+    function getReaderImageSourceCandidates(element) {
+        if (!element) return [];
+        var values = [
+            element.currentSrc,
+            element.src,
+            element.href && element.href.baseVal,
+            element.getAttribute && element.getAttribute("src"),
+            element.getAttribute && element.getAttribute("href"),
+            element.getAttribute && element.getAttribute("xlink:href"),
+            element.getAttribute && element.getAttribute("data-src"),
+        ];
+        return values.filter(function (value, index, array) {
+            return value && array.indexOf(value) === index;
+        });
+    }
+
+    function readerImageCandidateMatches(candidate, normalizedTargets) {
+        var normalizedCandidate = normalizeReaderImageSourceForMatch(candidate);
+        if (!normalizedCandidate) return false;
+        var candidateName = normalizedCandidate.substring(normalizedCandidate.lastIndexOf("/") + 1);
+
+        return normalizedTargets.some(function (target) {
+            if (!target) return false;
+            var targetName = target.substring(target.lastIndexOf("/") + 1);
+            return (
+                normalizedCandidate === target ||
+                normalizedCandidate.endsWith("/" + targetName) ||
+                target.endsWith("/" + candidateName) ||
+                (candidateName && targetName && candidateName === targetName)
+            );
+        });
+    }
+
+    function findReaderImageElementsBySource(source, originalSource) {
+        var normalizedTargets = [source, originalSource]
+            .map(normalizeReaderImageSourceForMatch)
+            .filter(Boolean);
+        return getReaderImageElements().filter(function (element) {
+            return getReaderImageSourceCandidates(element).some(function (candidate) {
+                return readerImageCandidateMatches(candidate, normalizedTargets);
+            });
+        });
+    }
+
+    function findReaderImageChunkIndex(source, originalSource) {
+        if (!window.virtualization || !window.virtualization.chunksData) return -1;
+        var normalizedTargets = [source, originalSource]
+            .map(normalizeReaderImageSourceForMatch)
+            .filter(Boolean);
+        var targetNames = normalizedTargets
+            .map(function (target) {
+                return target.substring(target.lastIndexOf("/") + 1);
+            })
+            .filter(Boolean);
+
+        for (var i = 0; i < window.virtualization.chunksData.length; i++) {
+            var chunkHtml = window.virtualization.chunksData[i];
+            if (!chunkHtml) continue;
+            var normalizedChunk = normalizeReaderImageSourceForMatch(chunkHtml);
+            if (
+                normalizedTargets.some(function (target) {
+                    return normalizedChunk.indexOf(target) !== -1;
+                }) ||
+                targetNames.some(function (name) {
+                    return normalizedChunk.indexOf(name) !== -1;
+                })
+            ) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    window.scrollToReaderImageSource = function(source, ordinal, originalSource) {
+        var safeOrdinal = Math.max(0, parseInt(ordinal || 0, 10) || 0);
+        var matches = findReaderImageElementsBySource(source, originalSource);
+
+        if (!matches.length) {
+            var chunkIndex = findReaderImageChunkIndex(source, originalSource);
+            if (chunkIndex >= 0) {
+                var chunkDiv = document.querySelector('.chunk-container[data-chunk-index="' + chunkIndex + '"]');
+                if (chunkDiv && chunkDiv.innerHTML === "" && window.virtualization && window.virtualization.chunksData[chunkIndex]) {
+                    chunkDiv.innerHTML = window.virtualization.chunksData[chunkIndex];
+                    chunkDiv.style.height = "";
+                }
+                matches = findReaderImageElementsBySource(source, originalSource);
+            }
+        }
+
+        var target = matches[Math.min(safeOrdinal, Math.max(0, matches.length - 1))];
+        if (!target) return false;
+
+        var rect = target.getBoundingClientRect();
+        var targetScrollY = window.scrollY + rect.top - (window.VIEWPORT_PADDING_TOP + 10);
+        window.scrollTo({ top: Math.max(0, targetScrollY), behavior: "auto" });
+        setTimeout(function () {
+            if (window.reportScrollState) window.reportScrollState();
+        }, 80);
+        return true;
+    };
 
     window.scrollToCfi = function(cfi) {
         let cleanCfi = cfi;

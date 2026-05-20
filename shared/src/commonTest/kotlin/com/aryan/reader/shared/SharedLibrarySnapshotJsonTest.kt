@@ -76,6 +76,7 @@ class SharedLibrarySnapshotJsonTest {
                         pageSpreadMode = ReaderPageSpreadMode.TWO_PAGE,
                         pdfVerticalPageGapVisible = false,
                         pdfPageNumberOverlayVisible = false,
+                        pdfFirstPageStandaloneInSpread = true,
                         seamlessChapterNavigation = false,
                         chapterTurnDragMultiplier = 1.6f
                     ),
@@ -149,6 +150,7 @@ class SharedLibrarySnapshotJsonTest {
             appTextDimFactorLight = 0.75f,
             appTextDimFactorDark = 0.65f,
             appSeedColor = Color(0xFF006C4C),
+            appFontPreference = AppFontPreference.custom("font"),
             customAppThemes = listOf(
                 CustomAppTheme(id = "forest", name = "Forest", seedColor = Color(0xFF006C4C))
             ),
@@ -198,6 +200,7 @@ class SharedLibrarySnapshotJsonTest {
 
         assertTrue(SharedLibrarySnapshotJson.decodeOrEmpty("not json").books.isEmpty())
         assertTrue(decoded.books.isEmpty())
+        assertEquals(AppFontPreference.System, decoded.appFontPreference)
     }
 
     @Test

@@ -153,8 +153,11 @@ class TtsController(context: Context) : Player.Listener {
         bookTitle: String,
         chapterTitle: String?,
         coverImageUri: String?,
+        bookId: String? = null,
         chapterIndex: Int? = null,
         totalChapters: Int? = null,
+        pageIndex: Int? = null,
+        startChunkIndex: Int = 0,
         continueSession: Boolean = false,
         ttsMode: TtsPlaybackManager.TtsMode,
         playbackSource: String = "READER",
@@ -184,8 +187,11 @@ class TtsController(context: Context) : Player.Listener {
             putString(KEY_BOOK_TITLE, bookTitle)
             putString(KEY_CHAPTER_TITLE, chapterTitle)
             putString(KEY_COVER_IMAGE_URI, coverImageUri)
+            bookId?.let { putString(KEY_BOOK_ID, it) }
             chapterIndex?.let { putInt(KEY_CHAPTER_INDEX, it) }
             totalChapters?.let { putInt(KEY_TOTAL_CHAPTERS, it) }
+            pageIndex?.let { putInt(KEY_PAGE_INDEX, it) }
+            putInt(KEY_START_CHUNK_INDEX, startChunkIndex)
             putBoolean(KEY_CONTINUE_SESSION, continueSession)
             putString(KEY_TTS_MODE, ttsMode.name)
             putString(KEY_PLAYBACK_SOURCE, playbackSource)
@@ -254,6 +260,16 @@ class TtsController(context: Context) : Player.Listener {
         mediaController?.sendCustomCommand(SLICE_CURRENT_AND_RELOAD_COMMAND, Bundle.EMPTY)
     }
 
+    fun skipToPreviousChunk() {
+        Timber.d("UI sending SKIP_TO_PREVIOUS_TTS_CHUNK command.")
+        mediaController?.sendCustomCommand(SKIP_TO_PREVIOUS_TTS_CHUNK_COMMAND, Bundle.EMPTY)
+    }
+
+    fun skipToNextChunk() {
+        Timber.d("UI sending SKIP_TO_NEXT_TTS_CHUNK command.")
+        mediaController?.sendCustomCommand(SKIP_TO_NEXT_TTS_CHUNK_COMMAND, Bundle.EMPTY)
+    }
+
     override fun onEvents(player: Player, events: Player.Events) {
         Timber.tag(TTS_NOTIFICATION_DIAG_TAG).i(
             "Controller onEvents. playbackState=${player.playbackState}, isPlaying=${player.isPlaying}, playWhenReady=${player.playWhenReady}, mediaItems=${player.mediaItemCount}, currentIndex=${player.currentMediaItemIndex}, events=$events"
@@ -266,6 +282,7 @@ class TtsController(context: Context) : Player.Listener {
             val customState = controller.customLayout.firstOrNull()?.extras ?: Bundle.EMPTY
             val currentMediaItem = controller.currentMediaItem
             val mediaItemExtras = currentMediaItem?.mediaMetadata?.extras
+            val currentMediaBookTitle = currentMediaItem?.mediaMetadata?.title?.toString()
             val currentTextFromMediaItem = mediaItemExtras?.getString("ttsText")
                 ?: currentMediaItem?.mediaMetadata?.subtitle?.toString()
             val isPlaybackActive = controller.isPlaying || controller.playbackState == Player.STATE_READY || controller.playbackState == Player.STATE_BUFFERING
@@ -278,12 +295,17 @@ class TtsController(context: Context) : Player.Listener {
             val serviceChapterTitle = customState.getString("chapterTitle")
             val serviceChapterIndex = customState.getInt("chapterIndex", -1).takeIf { it >= 0 }
             val serviceTotalChapters = customState.getInt("totalChapters", -1).takeIf { it > 0 }
+            val serviceBookId = customState.getString("bookId") ?: mediaItemExtras?.getString("bookId")
+            val servicePageIndex = customState.getInt("pageIndex", -1)
+                .takeIf { it >= 0 }
+                ?: mediaItemExtras?.getInt("pageIndex", -1)?.takeIf { it >= 0 }
             val serviceCurrentChunkIndex = customState.getInt("currentChunkIndex", -1)
             val serviceTotalChunks = customState.getInt("totalChunks", 0)
             val serviceBookProgressPercent = customState.getInt("bookProgressPercent", -1).takeIf { it >= 0 }
 
-            val sourceCfi = mediaItemExtras?.getString("sourceCfi")
-            val startOffset = mediaItemExtras?.getInt("startOffset", -1) ?: -1
+            val sourceCfi = mediaItemExtras?.getString("sourceCfi") ?: customState.getString("sourceCfi")
+            val startOffset = mediaItemExtras?.getInt("startOffset", -1)
+                ?: customState.getInt("startOffset", -1)
             val currentWordSourceCfi = customState.getString("currentWordSourceCfi")
             val currentWordStartOffset = customState.getInt("currentWordStartOffset", -1)
             val serviceMode = customState.getString("ttsMode", _ttsState.value.ttsMode)
@@ -298,8 +320,13 @@ class TtsController(context: Context) : Player.Listener {
                     if (isLoading) currentState.currentText else null
                 },
                 errorMessage = customState.getString("errorMessage"),
+                bookId = if (isPlaybackActive || isLoading) {
+                    serviceBookId ?: currentState.bookId
+                } else {
+                    serviceBookId
+                },
                 bookTitle = if (isPlaybackActive) {
-                    currentMediaItem?.mediaMetadata?.artist?.toString() ?: serviceBookTitle
+                    currentMediaBookTitle ?: serviceBookTitle
                 } else {
                     if (isLoading) currentState.bookTitle else serviceBookTitle
                 },
@@ -317,6 +344,11 @@ class TtsController(context: Context) : Player.Listener {
                     serviceTotalChapters ?: currentState.totalChapters
                 } else {
                     serviceTotalChapters
+                },
+                pageIndex = if (isPlaybackActive || isLoading) {
+                    servicePageIndex ?: currentState.pageIndex
+                } else {
+                    servicePageIndex
                 },
                 currentChunkIndex = serviceCurrentChunkIndex,
                 totalChunks = serviceTotalChunks,

@@ -143,6 +143,7 @@ enum class SharedSettingsAction {
     TABS_TOGGLE,
     RECENT_LIMIT,
     STRICT_FILE_FILTER,
+    PDF_FILENAME_DISPLAY_NAME,
     EXTERNAL_FILE_BEHAVIOR,
     SCREEN_CAPTURE_PROTECTION,
     CUSTOM_FONTS,
@@ -579,6 +580,7 @@ data class SharedSettingsHubModel(
             SharedSettingsAction.SCREEN_CAPTURE_PROTECTION,
             SharedSettingsAction.EXTERNAL_FILE_BEHAVIOR,
             SharedSettingsAction.STRICT_FILE_FILTER,
+            SharedSettingsAction.PDF_FILENAME_DISPLAY_NAME,
             SharedSettingsAction.TABS_TOGGLE,
             SharedSettingsAction.HIDE_READER_AI,
             SharedSettingsAction.CLEAR_BOOK_CACHE,
@@ -643,6 +645,7 @@ data class SharedSettingsHubInput(
     val isDebugBuild: Boolean = false,
     val isSignedIn: Boolean = false,
     val isProUser: Boolean = false,
+    val accountAvailable: Boolean = true,
     val syncAvailable: Boolean = true,
     val folderSyncAvailable: Boolean = true,
     val aiSettingsAvailable: Boolean = true,
@@ -655,14 +658,18 @@ data class SharedSettingsHubInput(
     val includeRecentLimit: Boolean = true,
     val includeCustomFonts: Boolean = true,
     val includeStrictFileFilter: Boolean = true,
+    val includePdfFileNameDisplayName: Boolean = false,
     val includeReaderTabs: Boolean = true,
     val includeHideReaderAi: Boolean = true,
     val includeCloudLocalDataClear: Boolean = false,
     val supportProjectAvailable: Boolean = true,
+    val languageTitle: String = "Language",
+    val languageSummary: String = "Choose the app language",
     val isTabsEnabled: Boolean = true,
     val isSyncEnabled: Boolean = false,
     val isFolderSyncEnabled: Boolean = false,
     val useStrictFileFilter: Boolean = false,
+    val usePdfFileNameAsDisplayName: Boolean = false,
     val isScreenCaptureProtectionEnabled: Boolean = false,
     val hideReaderAi: Boolean = false
 )
@@ -743,7 +750,7 @@ fun sharedSettingsHubModel(input: SharedSettingsHubInput): SharedSettingsHubMode
         SharedSettingsSectionModel(
             section = SharedSettingsSection.SYNC_ACCOUNTS,
             items = buildList {
-                if (input.syncAvailable && input.featurePolicy.aiAndCloud) {
+                if (input.accountAvailable && input.featurePolicy.aiAndCloud) {
                     if (input.isSignedIn) {
                         add(
                             SharedSettingsItemModel(
@@ -762,6 +769,8 @@ fun sharedSettingsHubModel(input: SharedSettingsHubInput): SharedSettingsHubMode
                             )
                         )
                     }
+                }
+                if (input.syncAvailable && input.featurePolicy.aiAndCloud) {
                     add(
                         SharedSettingsItemModel(
                             action = SharedSettingsAction.CLOUD_SYNC,
@@ -888,8 +897,8 @@ fun sharedSettingsHubModel(input: SharedSettingsHubInput): SharedSettingsHubMode
                     add(
                         SharedSettingsItemModel(
                             action = SharedSettingsAction.LANGUAGE,
-                            title = "Language",
-                            summary = "Choose the app language"
+                            title = input.languageTitle,
+                            summary = input.languageSummary
                         )
                     )
                 }
@@ -921,6 +930,21 @@ fun sharedSettingsHubModel(input: SharedSettingsHubInput): SharedSettingsHubMode
                             summary = "Use only known reader file types in import pickers",
                             kind = SharedSettingsItemKind.TOGGLE,
                             checked = input.useStrictFileFilter
+                        )
+                    )
+                }
+                if (input.includePdfFileNameDisplayName) {
+                    add(
+                        SharedSettingsItemModel(
+                            action = SharedSettingsAction.PDF_FILENAME_DISPLAY_NAME,
+                            title = "Use PDF filenames",
+                            summary = if (input.usePdfFileNameAsDisplayName) {
+                                "PDF lists and tabs show filenames instead of embedded titles."
+                            } else {
+                                "PDF lists and tabs prefer embedded titles when available."
+                            },
+                            kind = SharedSettingsItemKind.TOGGLE,
+                            checked = input.usePdfFileNameAsDisplayName
                         )
                     )
                 }

@@ -9,7 +9,8 @@ internal data class DesktopReaderOpening(
     val bookId: String,
     val title: String,
     val formatLabel: String,
-    val returnTab: SharedAppTab
+    val returnTab: SharedAppTab,
+    val password: String? = null
 )
 
 internal sealed interface DesktopReaderOpenResult {
@@ -32,5 +33,11 @@ internal sealed interface DesktopReaderOpenResult {
         override val opening: DesktopReaderOpening,
         override val book: BookItem,
         val message: String
+    ) : DesktopReaderOpenResult
+
+    data class PasswordRequired(
+        override val opening: DesktopReaderOpening,
+        override val book: BookItem,
+        val attemptedPassword: Boolean
     ) : DesktopReaderOpenResult
 }

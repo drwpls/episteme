@@ -67,6 +67,24 @@
 
 -keep class com.aryan.reader.paginatedreader.Woff2Converter { *; }
 
+# R8 can fold the large EPUB Scaffold content lambda into ChapterWebViewKt with
+# hundreds of captured Compose state parameters. ART rejects that release-only
+# synthetic method when opening EPUBs, so keep these file facades out of those
+# optimizer passes while leaving the rest of the app minified.
+-keep class com.aryan.reader.epubreader.EpubReaderScreenKt { *; }
+-keep class com.aryan.reader.epubreader.EpubReaderScreenKt$* { *; }
+-keep class com.aryan.reader.epubreader.ChapterWebViewKt { *; }
+-keep class com.aryan.reader.epubreader.ChapterWebViewKt$* { *; }
+
+# The PDF reader is another very large Compose surface. Keeping its file facade
+# out of release optimizer folding avoids ART's compiler instruction-limit path
+# and preserves the private pdfium wrapper fields read for native pointer access.
+-keep class com.aryan.reader.pdf.PdfViewerScreenKt { *; }
+-keep class com.aryan.reader.pdf.PdfViewerScreenKt$* { *; }
+-keep class com.aryan.reader.pdf.PdfPageComposableKt { *; }
+-keep class com.aryan.reader.pdf.PdfPageComposableKt$* { *; }
+-keep class io.legere.pdfiumandroid.** { *; }
+
 -dontwarn com.gemalto.jp2.**
 
 # Flexmark Markdown parser rules

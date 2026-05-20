@@ -154,6 +154,15 @@ fun VerticalScrollbar(
 
 @Composable
 internal fun PageScrubbingAnimation(currentPage: Int, totalPages: Int) {
+    PageScrubbingAnimation(
+        pageLabel = "Page $currentPage of $totalPages"
+    )
+}
+
+@Composable
+internal fun PageScrubbingAnimation(
+    pageLabel: String
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -178,7 +187,7 @@ internal fun PageScrubbingAnimation(currentPage: Int, totalPages: Int) {
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                text = "Page $currentPage of $totalPages",
+                text = pageLabel,
                 style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.onSurface
             )
@@ -188,9 +197,16 @@ internal fun PageScrubbingAnimation(currentPage: Int, totalPages: Int) {
 
 @Composable
 internal fun ThumbnailWithIndicator(
-    thumbnail: Bitmap, modifier: Modifier = Modifier, onClick: () -> Unit
+    thumbnail: Bitmap,
+    modifier: Modifier = Modifier,
+    borderColor: Color = Color.Unspecified,
+    onClick: () -> Unit
 ) {
-    val borderColor = MaterialTheme.colorScheme.primary
+    val effectiveBorderColor = if (borderColor == Color.Unspecified) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        borderColor
+    }
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Surface(
             modifier = Modifier
@@ -198,7 +214,7 @@ internal fun ThumbnailWithIndicator(
                 .height(64.dp)
                 .clickable(onClick = onClick),
             shape = RoundedCornerShape(4.dp),
-            border = BorderStroke(2.dp, borderColor)
+            border = BorderStroke(2.dp, effectiveBorderColor)
         ) {
             Image(
                 bitmap = thumbnail.asImageBitmap(),
@@ -211,7 +227,7 @@ internal fun ThumbnailWithIndicator(
             .offset(y = (-4).dp)
             .size(8.dp)
             .rotate(45f)
-            .background(borderColor))
+            .background(effectiveBorderColor))
     }
 }
 

@@ -11,7 +11,6 @@ import android.graphics.PorterDuffColorFilter
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
-import android.util.LruCache
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.animation.core.Animatable
@@ -71,9 +70,7 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageShader
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.ShaderBrush
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.asImageBitmap
@@ -120,7 +117,6 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.zIndex
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
-import androidx.core.graphics.set
 import com.aryan.reader.R
 import com.aryan.reader.SearchResult
 import com.aryan.reader.isCanvasSafeBitmap
@@ -145,99 +141,21 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import timber.log.Timber
-import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.coroutines.cancellation.CancellationException
-import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlin.math.sqrt
-import android.graphics.Color as AndroidColor
 import android.graphics.Paint as NativePaint
 
 enum class Handle {
     START, END
-}
-
-enum class AnnotationType {
-    INK, TEXT
-}
-
-enum class InkType {
-    PEN, HIGHLIGHTER, HIGHLIGHTER_ROUND, ERASER, FOUNTAIN_PEN, PENCIL, TEXT
-}
-
-internal fun shouldReportPdfPageCamera(
-    isZoomEnabled: Boolean,
-    isVerticalScroll: Boolean,
-    isScrollLocked: Boolean,
-    lockedState: Triple<Float, Float, Float>?,
-    hasAppliedLockedState: Boolean
-): Boolean {
-    return !isZoomEnabled ||
-        isVerticalScroll ||
-        !isScrollLocked ||
-        lockedState == null ||
-        hasAppliedLockedState
-}
-
-internal fun initialPdfPageCamera(
-    isZoomEnabled: Boolean,
-    isVerticalScroll: Boolean,
-    isScrollLocked: Boolean,
-    lockedState: Triple<Float, Float, Float>?
-): Pair<Float, Offset> {
-    return if (isZoomEnabled && !isVerticalScroll && isScrollLocked && lockedState != null) {
-        lockedState.first to Offset(lockedState.second, lockedState.third)
-    } else {
-        1f to Offset.Zero
-    }
-}
-
-internal fun shouldResetPdfZoomAfterBubbleZoomCleanup(
-    isBubbleZoomModeActive: Boolean,
-    scale: Float,
-    isVerticalScroll: Boolean,
-    isZoomEnabled: Boolean,
-    isScrollLocked: Boolean
-): Boolean {
-    return !isBubbleZoomModeActive &&
-        scale > 1f &&
-        !isVerticalScroll &&
-        isZoomEnabled &&
-        !isScrollLocked
-}
-
-data class EmbeddedAnnotation(
-    val index: Int,
-    val subtype: Int,
-    val rect: android.graphics.RectF,
-    val contents: String?,
-    val author: String?,
-    val name: String?,
-    val inReplyTo: String?,
-    val replies: MutableList<EmbeddedAnnotation> = mutableListOf()
-)
-
-data class PdfPoint(val x: Float, val y: Float, val timestamp: Long = 0L)
-
-data class PdfTile(val bitmap: Bitmap, val renderRect: Rect, val tileId: Int, val renderScale: Float = 1f)
-
-internal fun pdfRenderPageId(documentKey: String, pageIndex: Int, virtualPage: VirtualPage?): String {
-    val sourcePageId = when (virtualPage) {
-        is VirtualPage.BlankPage -> "BLANK_${virtualPage.id}"
-        is VirtualPage.PdfPage -> "PDF_${virtualPage.pdfIndex}"
-        null -> "PDF_$pageIndex"
-    }
-    return "$documentKey:$sourcePageId"
 }
 
 private fun Throwable.readablePdfErrorDetail(): String {
@@ -248,262 +166,12 @@ private fun Throwable.readablePdfErrorDetail(): String {
 
 private const val PDF_TILE_SIZE_DP = 256
 private const val PDF_MAX_TILE_BITMAP_SIZE_PX = 3072
-private const val PDF_MAX_DRAW_BITMAP_BYTES = 64L * 1024L * 1024L
-private const val PDF_MAX_DRAW_BITMAP_DIMENSION_PX = 4096
 private const val PDF_TILE_SCALE_TOLERANCE = 0.06f
-private const val PDF_TILE_IDLE_RENDER_DELAY_MS = 90L
+private const val PDF_TILE_IDLE_RENDER_DELAY_MS = 60L
+private const val PDF_TILE_RENDER_IDLE_COOLDOWN_MS = 220L
 private const val PDF_PAGINATION_PAN_FLING_MIN_VELOCITY = 600f
 private const val PDF_PAGINATION_PAN_FLING_MULTIPLIER = 0.72f
-
-enum class LinkSource {
-    ANNOTATION, TEXT_CONTENT
-}
-
-data class PageLink(
-    val highlightBounds: Rect,
-    val tapBounds: Rect,
-    val url: String?,
-    val destPageIdx: Int?,
-    val source: LinkSource
-)
-
-private data class ExpandedBubbleRender(
-    val bitmap: Bitmap,
-    val zoomFactor: Float
-)
-
-private fun computeDynamicBubbleZoomFactor(
-    bubbleBounds: RectF,
-    viewportWidth: Float,
-    viewportHeight: Float
-): Float {
-    if (bubbleBounds.width() <= 0f || bubbleBounds.height() <= 0f) return 1.5f
-    val targetWidth = viewportWidth * 0.6f
-    val targetHeight = viewportHeight * 0.32f
-    return min(targetWidth / bubbleBounds.width(), targetHeight / bubbleBounds.height())
-        .coerceIn(1.35f, 4.25f)
-}
-
-private fun isTapInsideBubble(
-    bubble: SpeechBubble,
-    tapX: Float,
-    tapY: Float,
-    hitSlopPx: Float
-): Boolean {
-    val expandedBounds = RectF(bubble.bounds)
-    expandedBounds.inset(-hitSlopPx, -hitSlopPx)
-    if (!expandedBounds.contains(tapX, tapY)) return false
-
-    val mask = bubble.maskBitmap ?: return true
-    if (!bubble.bounds.contains(tapX, tapY)) return true
-
-    val normalizedX = ((tapX - bubble.bounds.left) / bubble.bounds.width()).coerceIn(0f, 0.999f)
-    val normalizedY = ((tapY - bubble.bounds.top) / bubble.bounds.height()).coerceIn(0f, 0.999f)
-    val maskX = (normalizedX * mask.width).toInt().coerceIn(0, mask.width - 1)
-    val maskY = (normalizedY * mask.height).toInt().coerceIn(0, mask.height - 1)
-    return AndroidColor.alpha(mask.getPixel(maskX, maskY)) > 24
-}
-
-private suspend fun renderExpandedBubbleBitmap(
-    document: ReaderDocument,
-    pageIndex: Int,
-    bubbleBounds: RectF,
-    pageWidth: Int,
-    pageHeight: Int,
-    renderScale: Float
-): Bitmap? = withContext(Dispatchers.IO) {
-    if (pageWidth <= 0 || pageHeight <= 0 || bubbleBounds.width() <= 0f || bubbleBounds.height() <= 0f) {
-        return@withContext null
-    }
-
-    document.openPage(pageIndex)?.use { page ->
-        val safeRenderScale = safePdfBitmapRenderScale(
-            contentWidth = bubbleBounds.width(),
-            contentHeight = bubbleBounds.height(),
-            requestedScale = renderScale
-        )
-        val cropWidth = (bubbleBounds.width() * safeRenderScale).roundToInt().coerceAtLeast(1)
-        val cropHeight = (bubbleBounds.height() * safeRenderScale).roundToInt().coerceAtLeast(1)
-        val bitmap = createBitmap(cropWidth, cropHeight)
-
-        try {
-            page.renderPageBitmap(
-                bitmap = bitmap,
-                startX = (-bubbleBounds.left * safeRenderScale).roundToInt(),
-                startY = (-bubbleBounds.top * safeRenderScale).roundToInt(),
-                drawSizeX = (pageWidth * safeRenderScale).roundToInt().coerceAtLeast(cropWidth),
-                drawSizeY = (pageHeight * safeRenderScale).roundToInt().coerceAtLeast(cropHeight),
-                renderAnnot = true
-            )
-            bitmap
-        } catch (t: Throwable) {
-            bitmap.recycle()
-            Timber.tag("BubbleZoom").w(t, "Failed to render expanded bubble bitmap for page $pageIndex")
-            null
-        }
-    }
-}
-
-private fun safePdfBitmapRenderScale(
-    contentWidth: Float,
-    contentHeight: Float,
-    requestedScale: Float
-): Float {
-    if (contentWidth <= 0f || contentHeight <= 0f || requestedScale <= 0f) return 1f
-
-    val requestedWidth = contentWidth * requestedScale
-    val requestedHeight = contentHeight * requestedScale
-    val requestedBytes = requestedWidth.toDouble() * requestedHeight.toDouble() * 4.0
-    val byteScale = sqrt(PDF_MAX_DRAW_BITMAP_BYTES.toDouble() / requestedBytes.coerceAtLeast(1.0))
-    val dimensionScale = PDF_MAX_DRAW_BITMAP_DIMENSION_PX.toDouble() /
-        max(requestedWidth, requestedHeight).toDouble().coerceAtLeast(1.0)
-    val limiter = min(1.0, min(byteScale, dimensionScale)).coerceAtLeast(0.01)
-    return (requestedScale.toDouble() * limiter).coerceAtLeast(0.01).toFloat()
-}
-
-object PdfInkGeometry {
-    fun calculateFountainPenPoints(
-        points: List<PdfPoint>, baseWidth: Float, pageWidth: Float, pageHeight: Float
-    ): Pair<List<Offset>, List<Offset>> {
-        if (points.size < 2) return Pair(emptyList(), emptyList())
-
-        if (points.size % 50 == 0) {
-            Timber.tag("FountainPenDebug").d(
-                "Calculate Points: PWidth=$pageWidth, PHeight=$pageHeight, BaseW=$baseWidth, Pts=${points.size}"
-            )
-        }
-
-        val leftSide = mutableListOf<Offset>()
-        val rightSide = mutableListOf<Offset>()
-
-        val computedWidths = FloatArray(points.size)
-        computedWidths[0] = baseWidth
-
-        val velocityFactor = 300f
-
-        for (i in 1 until points.size) {
-            val p1 = points[i - 1]
-            val p2 = points[i]
-
-            val dxNorm = p2.x - p1.x
-            val dyNorm = p2.y - p1.y
-            val aspect = if (pageWidth > 0 && pageHeight > 0) pageHeight / pageWidth else 1f
-            val distNorm = sqrt(dxNorm * dxNorm + (dyNorm * aspect) * (dyNorm * aspect))
-
-            val timeDelta = (p2.timestamp - p1.timestamp).coerceAtLeast(1)
-            val velocityNorm = distNorm / timeDelta
-
-            val targetWidth = (baseWidth * (1f / (1f + velocityNorm * velocityFactor))).coerceIn(
-                baseWidth * 0.2f, baseWidth * 1.4f
-            )
-
-            computedWidths[i] = computedWidths[i - 1] * 0.6f + targetWidth * 0.4f
-
-            if (i < 5) {
-                Timber.tag("FountainPenDebug").v(
-                    "Pt[$i]: dt=$timeDelta, velNorm=$velocityNorm, width=${computedWidths[i]} (base=$baseWidth)"
-                )
-            }
-        }
-
-        for (i in 0 until points.size - 1) {
-            val pCurrent = points[i]
-            val pNext = points[i + 1]
-
-            val curX = pCurrent.x * pageWidth
-            val curY = pCurrent.y * pageHeight
-            val nextX = pNext.x * pageWidth
-            val nextY = pNext.y * pageHeight
-
-            val angle = atan2(nextY - curY, nextX - curX)
-            val normalAngle = angle - (PI / 2f).toFloat()
-
-            val w = computedWidths[i] / 2f
-
-            leftSide.add(Offset((curX + cos(normalAngle) * w), (curY + sin(normalAngle) * w)))
-            rightSide.add(Offset((curX - cos(normalAngle) * w), (curY - sin(normalAngle) * w)))
-        }
-
-        val lastIdx = points.lastIndex
-        val lastP = points[lastIdx]
-        val prevP = points[lastIdx - 1]
-
-        val lastX = lastP.x * pageWidth
-        val lastY = lastP.y * pageHeight
-        val prevX = prevP.x * pageWidth
-        val prevY = prevP.y * pageHeight
-
-        val lastAngle = atan2(lastY - prevY, lastX - prevX)
-        val lastNormal = lastAngle - (PI / 2f).toFloat()
-        val lastW = computedWidths[lastIdx] / 2f
-
-        leftSide.add(Offset((lastX + cos(lastNormal) * lastW), (lastY + sin(lastNormal) * lastW)))
-        rightSide.add(Offset((lastX - cos(lastNormal) * lastW), (lastY - sin(lastNormal) * lastW)))
-
-        return Pair(leftSide, rightSide)
-    }
-}
-
-internal object PdfBitmapPool {
-    private val pool = ConcurrentLinkedQueue<Bitmap>()
-    private const val MAX_POOL_SIZE = 4
-
-    fun get(width: Int, height: Int): Bitmap {
-        val iterator = pool.iterator()
-        while (iterator.hasNext()) {
-            val b = iterator.next()
-            if (b.width == width && b.height == height && !b.isRecycled) {
-                iterator.remove()
-                b.eraseColor(AndroidColor.TRANSPARENT)
-                return b
-            }
-        }
-        return createBitmap(width, height)
-    }
-
-    fun get(size: Int): Bitmap = get(size, size)
-
-    fun recycle(bitmap: Bitmap) {
-        // Overflow bitmaps are left for GC; HWUI may still reference recently drawn bitmaps.
-        if (!bitmap.isRecycled && pool.size < MAX_POOL_SIZE) {
-            pool.offer(bitmap)
-        }
-    }
-
-    fun clear() {
-        while (!pool.isEmpty()) {
-            pool.poll()
-        }
-    }
-}
-
-internal object PdfThumbnailCache {
-    private val maxMemory = (Runtime.getRuntime().maxMemory() / 1024).toInt()
-    private val cacheSize = maxMemory / 8
-
-    private data class CacheEntry(val bitmap: Bitmap, val sizeKb: Int)
-
-    private val memoryCache = object : LruCache<String, CacheEntry>(cacheSize) {
-        override fun sizeOf(key: String, entry: CacheEntry): Int {
-            return entry.sizeKb
-        }
-    }
-
-    fun get(pageId: String): Bitmap? {
-        return memoryCache.get(pageId)?.bitmap?.takeUnless { it.isRecycled }
-    }
-
-    fun put(pageId: String, bitmap: Bitmap) {
-        if (get(pageId) == null) {
-            val sizeKb = (bitmap.allocationByteCount / 1024).coerceAtLeast(1)
-            memoryCache.put(pageId, CacheEntry(bitmap, sizeKb))
-        }
-    }
-
-    fun clear() {
-        memoryCache.evictAll()
-    }
-}
+private val pdfHighResTileRenderMutex = Mutex()
 
 @Stable
 data class StableHolder<T>(val item: T)
@@ -512,6 +180,7 @@ data class StableHolder<T>(val item: T)
 data class PageStaticData(
     val bitmap: StableHolder<Bitmap?>,
     val tiles: StableHolder<List<PdfTile>>,
+    val shouldDrawHighResTiles: Boolean,
     val effectiveScale: Float,
     val centeringOffsetX: Float,
     val centeringOffsetY: Float,
@@ -601,6 +270,9 @@ internal fun PdfPageComposable(
     activeTextureAlpha: Float = 0.55f,
     excludeImages: Boolean = false,
     onDoubleTap: ((Offset) -> Unit)? = null,
+    onDoubleTapDragZoomStart: ((Offset) -> Unit)? = null,
+    onDoubleTapDragZoom: ((Offset, Float) -> Unit)? = null,
+    onDoubleTapDragZoomEnd: (() -> Unit)? = null,
     isEditMode: Boolean = false,
     drawingState: PdfDrawingState? = null,
     pageAnnotations: () -> List<PdfAnnotation> = { emptyList() },
@@ -661,6 +333,8 @@ internal fun PdfPageComposable(
     var ocrRipplePosition by remember { mutableStateOf<Offset?>(null) }
 
     var isTransforming by remember { mutableStateOf(false) }
+    var isPaginationPageGestureActive by remember { mutableStateOf(false) }
+    var isPageTileRenderIdleCooldownActive by remember { mutableStateOf(false) }
     val initialCamera = initialPdfPageCamera(
         isZoomEnabled = isZoomEnabled,
         isVerticalScroll = isVerticalScroll,
@@ -670,6 +344,17 @@ internal fun PdfPageComposable(
     var scale by remember(targetPageId) { mutableFloatStateOf(initialCamera.first) }
     var offset by remember(targetPageId) { mutableStateOf(initialCamera.second) }
     var paginationPanFlingJob by remember { mutableStateOf<Job?>(null) }
+    val shouldPauseHighResTileRendering =
+        isScrolling ||
+            isTransforming ||
+            isPaginationPageGestureActive ||
+            paginationPanFlingJob != null ||
+            isPageTileRenderIdleCooldownActive
+    val pageMotionActive =
+        isScrolling ||
+            isTransforming ||
+            isPaginationPageGestureActive ||
+            paginationPanFlingJob != null
     var hasAppliedLockedPaginationState by remember(targetPageId) {
         mutableStateOf(initialCamera.second != Offset.Zero || initialCamera.first != 1f)
     }
@@ -690,9 +375,14 @@ internal fun PdfPageComposable(
     val currentOnSingleTap by rememberUpdatedState(onSingleTap)
     val currentOnPreSingleTap by rememberUpdatedState(onPreSingleTap)
     val currentOnDoubleTap by rememberUpdatedState(onDoubleTap)
+    val currentOnDoubleTapDragZoomStart by rememberUpdatedState(onDoubleTapDragZoomStart)
+    val currentOnDoubleTapDragZoom by rememberUpdatedState(onDoubleTapDragZoom)
+    val currentOnDoubleTapDragZoomEnd by rememberUpdatedState(onDoubleTapDragZoomEnd)
 
     val effectiveScale = if (isZoomEnabled && !isVerticalScroll) scale else externalScale
     val effectiveOffset = if (isZoomEnabled && !isVerticalScroll) offset else Offset.Zero
+    val latestScale by rememberUpdatedState(scale)
+    val latestOffset by rememberUpdatedState(offset)
 
     var eraserPosition by remember { mutableStateOf<Offset?>(null) }
 
@@ -712,6 +402,25 @@ internal fun PdfPageComposable(
     val tileSizePx = with(LocalDensity.current) { tileSizeDp.toPx().toInt() }
     val latestEffectiveScale by rememberUpdatedState(effectiveScale)
     val latestEffectiveOffset by rememberUpdatedState(effectiveOffset)
+    val latestIsScrolling by rememberUpdatedState(isScrolling)
+    val latestIsAutoScrollPlaying by rememberUpdatedState(isAutoScrollPlaying)
+    val latestShouldPauseHighResTileRendering by rememberUpdatedState(shouldPauseHighResTileRendering)
+
+    LaunchedEffect(isVerticalScroll, pageMotionActive) {
+        if (isVerticalScroll) {
+            if (isPageTileRenderIdleCooldownActive) {
+                isPageTileRenderIdleCooldownActive = false
+            }
+            return@LaunchedEffect
+        }
+
+        if (pageMotionActive) {
+            isPageTileRenderIdleCooldownActive = true
+        } else if (isPageTileRenderIdleCooldownActive) {
+            delay(PDF_TILE_RENDER_IDLE_COOLDOWN_MS)
+            isPageTileRenderIdleCooldownActive = false
+        }
+    }
 
     SideEffect {
         Timber.tag("PdfDrawPerf")
@@ -838,6 +547,7 @@ internal fun PdfPageComposable(
 
     val inputScale = if (isZoomEnabled && !isVerticalScroll) scale else 1f
     val inputOffset = if (isZoomEnabled && !isVerticalScroll) offset else Offset.Zero
+    val latestInputScale by rememberUpdatedState(inputScale)
 
     val screenToContentCoordinates: (Offset) -> Offset = { screenOffset ->
         val screenCenter = Offset(canvasWidthPx.floatValue / 2f, canvasHeightPx.floatValue / 2f)
@@ -852,6 +562,9 @@ internal fun PdfPageComposable(
         val screenOffset = (pCanvas - screenCenter) * inputScale + screenCenter + inputOffset
         screenOffset
     }
+    val latestScreenToContentCoordinates by rememberUpdatedState(screenToContentCoordinates)
+    var isOneHandZooming by remember(targetPageId) { mutableStateOf(false) }
+    val latestIsOneHandZooming by rememberUpdatedState(isOneHandZooming)
 
     var detectedBubbles by remember(targetPageId) { mutableStateOf<List<SpeechBubble>>(emptyList()) }
     var expandedBubbleIndex by remember(targetPageId) { mutableIntStateOf(-1) }
@@ -1281,127 +994,23 @@ internal fun PdfPageComposable(
                         Timber.e(e, "Error fetching web links")
                     }
 
-                    // --- Extract Image Bounds ---
-                    try {
-                        val pagePtr = pageWrapper.getNativePointer()
-                        if (pagePtr != 0L) {
-                            val objCount = PdfiumEngineProvider.bridge.getPageObjectCount(pagePtr)
-                            val imgRects = mutableListOf<android.graphics.Rect>()
-                            val outRect = FloatArray(4)
+                    val nativeExtraction = (pageWrapper as? PdfPageWrapper)?.extractNativePageOverlays(
+                        bitmapWidthPx = actualBitmapWidthPx,
+                        bitmapHeightPx = actualBitmapHeightPx,
+                        pageRotation = currentPageRotation,
+                        pageIndex = pageIndex,
+                        linkAnnotationSubtype = annotLink
+                    )
 
-                            for (i in 0 until objCount) {
-                                if (PdfiumEngineProvider.bridge.getPageObjectType(pagePtr, i) == 3) { // 3 = FPDF_PAGEOBJ_IMAGE
-                                    if (PdfiumEngineProvider.bridge.getPageObjectBoundingBox(pagePtr, i, outRect)) {
-                                        val pdfRectF = android.graphics.RectF(
-                                            min(outRect[0], outRect[2]),
-                                            max(outRect[1], outRect[3]),
-                                            max(outRect[0], outRect[2]),
-                                            min(outRect[1], outRect[3])
-                                        )
-                                        val deviceRect = pageWrapper.mapRectToDevice(
-                                            0, 0, actualBitmapWidthPx, actualBitmapHeightPx,
-                                            currentPageRotation, pdfRectF
-                                        )
-                                        if (deviceRect.width() > 0 && deviceRect.height() > 0) {
-                                            imgRects.add(android.graphics.Rect(deviceRect.left, deviceRect.top, deviceRect.right, deviceRect.bottom))
-                                        }
-                                    }
-                                }
-                            }
-                            mappedImageRects = imgRects
-                        }
-                    } catch (e: Exception) {
-                        Timber.tag("PdfImageDebug").e(e, "Error extracting image rects")
-                    }
-
-                    // 3. Extract Embedded Annotations
-                    try {
-                        val pagePtr = pageWrapper.getNativePointer()
-
-                        if (pagePtr != 0L) {
-                            val count = PdfiumEngineProvider.bridge.getAnnotCount(pagePtr)
-                            Timber.tag("PdfCommentDebug").d("Page $pageIndex: Total Annotations found = $count")
-                            if (count > 0) {
-                                val allAnnots = (0 until count).mapNotNull { i ->
-                                    val subtype = PdfiumEngineProvider.bridge.getAnnotSubtype(pagePtr, i)
-                                    if (subtype == annotLink) return@mapNotNull null
-
-                                    var contents = PdfiumEngineProvider.bridge.getAnnotString(pagePtr, i, "Contents")
-                                    if (contents.isNullOrBlank()) {
-                                        contents = PdfiumEngineProvider.bridge.getAnnotString(pagePtr, i, "RC")
-                                    }
-
-                                    val name = PdfiumEngineProvider.bridge.getAnnotString(pagePtr, i, "NM")
-                                    val irt = PdfiumEngineProvider.bridge.getAnnotString(pagePtr, i, "IRT")
-                                    val author = PdfiumEngineProvider.bridge.getAnnotString(pagePtr, i, "T")
-
-                                    val pdfRectArray = PdfiumEngineProvider.bridge.getAnnotRect(pagePtr, i)
-                                    val pdfRectF = if (pdfRectArray != null) {
-                                        android.graphics.RectF(
-                                            min(pdfRectArray[0], pdfRectArray[2]),
-                                            max(pdfRectArray[1], pdfRectArray[3]),
-                                            max(pdfRectArray[0], pdfRectArray[2]),
-                                            min(pdfRectArray[1], pdfRectArray[3])
-                                        )
-                                    } else android.graphics.RectF()
-
-                                    EmbeddedAnnotation(i, subtype, pdfRectF, contents, author, name, irt)
-                                }
-
-                                val annotMap = allAnnots.associateBy { it.name }
-                                val orphans = mutableListOf<EmbeddedAnnotation>()
-
-                                allAnnots.forEach { annot ->
-                                    if (!annot.inReplyTo.isNullOrBlank() && annotMap.containsKey(annot.inReplyTo)) {
-                                        Timber.tag("PdfCommentDebug").i("Linking: ${annot.name} is a reply to ${annot.inReplyTo}")
-                                        annotMap[annot.inReplyTo]?.replies?.add(annot)
-                                    } else {
-                                        orphans.add(annot)
-                                    }
-                                }
-
-                                Timber.tag("PdfCommentDebug").d("After ID linking: Orphans count = ${orphans.size}")
-
-                                val groupedRoots = mutableListOf<MutableList<EmbeddedAnnotation>>()
-                                orphans.forEach { annot ->
-                                    val match = groupedRoots.find { group ->
-                                        val root = group.first()
-                                        val inflatedRoot = android.graphics.RectF(root.rect).apply { inset(-10f, -10f) }
-                                        android.graphics.RectF.intersects(inflatedRoot, annot.rect)
-                                    }
-                                    if (match != null) {
-                                        Timber.tag("PdfCommentDebug").w("Geometric grouping triggered for ${annot.name} with ${match.first().name}. This might flatten nested replies!")
-                                        match.add(annot)
-                                    } else {
-                                        groupedRoots.add(mutableListOf(annot))
-                                    }
-                                }
-
-                                val rootsWithReplies = groupedRoots.map { group ->
-                                    val root = group.first()
-                                    if (group.size > 1) {
-                                        root.replies.addAll(group.drop(1))
-                                    }
-                                    root
-                                }
-
-                                finalDisplayList = rootsWithReplies.filter {
-                                    !it.contents.isNullOrBlank() || it.replies.any { r -> !r.contents.isNullOrBlank() }
-                                }
-
-                                mappedAnnots = finalDisplayList.map { annot ->
-                                    val screenRect = pageWrapper.mapRectToDevice(
-                                        0, 0, actualBitmapWidthPx, actualBitmapHeightPx,
-                                        currentPageRotation, annot.rect
-                                    )
-                                    annot to screenRect
-                                }
-                            }
-                        } else {
+                    if (nativeExtraction == null) {
+                        Timber.tag("PdfCommentDebug").w("Page $pageIndex: Native overlay extraction unavailable for ${pageWrapper::class.java.simpleName}.")
+                    } else {
+                        if (!nativeExtraction.resolvedNativePointer) {
                             Timber.tag("PdfCommentDebug").w("Page $pageIndex: Failed to resolve native page pointer.")
                         }
-                    } catch (e: Exception) {
-                        Timber.tag("PdfCommentDebug").e(e, "Error extracting annotations")
+                        mappedImageRects = nativeExtraction.imageScreenRects
+                        finalDisplayList = nativeExtraction.embeddedAnnotations
+                        mappedAnnots = nativeExtraction.annotationScreenRects
                     }
                 }
             } catch (e: Exception) {
@@ -1452,13 +1061,17 @@ internal fun PdfPageComposable(
         canvasWidthPx.floatValue,
         canvasHeightPx.floatValue,
         isVerticalScroll,
-        isScrolling,
-        isAutoScrollPlaying,
         virtualPage,
         isActivePage
     ) {
+        var lastTileDiagLogMs = 0L
         if (!needsTilingNow) {
             if (tiles.isNotEmpty()) {
+                if (isVerticalScroll) {
+                    PdfVerticalPerfLog.d(
+                        "tile-clear page=$pageIndex reason=tiling-disabled count=${tiles.size} scale=${PdfVerticalPerfLog.f(latestEffectiveScale)}"
+                    )
+                }
                 val oldTiles = tiles
                 tiles = emptyList()
                 withContext(Dispatchers.IO) {
@@ -1471,12 +1084,24 @@ internal fun PdfPageComposable(
         val screenWidth = canvasWidthPx.floatValue
         val screenHeight = canvasHeightPx.floatValue
 
-        if (actualBitmapWidthPx == 0 || actualBitmapHeightPx == 0 || screenWidth == 0f || screenHeight == 0f) return@LaunchedEffect
+        if (actualBitmapWidthPx == 0 || actualBitmapHeightPx == 0 || screenWidth == 0f || screenHeight == 0f) {
+            if (isVerticalScroll) {
+                PdfVerticalPerfLog.w(
+                    "tile-skip page=$pageIndex reason=empty-dimensions bitmap=${actualBitmapWidthPx}x$actualBitmapHeightPx screen=${PdfVerticalPerfLog.xy(screenWidth, screenHeight)}"
+                )
+            }
+            return@LaunchedEffect
+        }
 
         var page: ReaderPage? = null
 
         if (!isPdfPage) {
             if (tiles.isNotEmpty()) {
+                if (isVerticalScroll) {
+                    PdfVerticalPerfLog.d(
+                        "tile-clear page=$pageIndex reason=virtual-page count=${tiles.size}"
+                    )
+                }
                 val oldTiles = tiles
                 tiles = emptyList()
                 withContext(Dispatchers.IO) {
@@ -1488,16 +1113,23 @@ internal fun PdfPageComposable(
 
         try {
             page = withContext(Dispatchers.IO) { pdfDocumentItem.openPage(pdfPageIndex) }
+            if (isVerticalScroll) {
+                PdfVerticalPerfLog.d(
+                    "tile-loop-open page=$pageIndex pdfPage=$pdfPageIndex bitmap=${actualBitmapWidthPx}x$actualBitmapHeightPx " +
+                        "screen=${PdfVerticalPerfLog.xy(screenWidth, screenHeight)} scale=${PdfVerticalPerfLog.f(latestEffectiveScale)}"
+                )
+            }
 
             snapshotFlow {
                 val rect = visibleScreenRect()
                 val observedScale = latestEffectiveScale
+                val pauseMarker = if (latestShouldPauseHighResTileRendering) 1 else 0
                 if (isVerticalScroll && rect != null) {
                     val qTop = rect.top / (tileSizePx / 2)
                     val qLeft = rect.left / (tileSizePx / 2)
                     val qBottom = rect.bottom / (tileSizePx / 2)
                     val qRight = rect.right / (tileSizePx / 2)
-                    listOf(qTop, qLeft, qBottom, qRight, (observedScale * 10f).roundToInt())
+                    listOf(qTop, qLeft, qBottom, qRight, (observedScale * 10f).roundToInt(), pauseMarker)
                 } else if (!isVerticalScroll) {
                     val observedOffset = latestEffectiveOffset
                     val pivotX = screenWidth / 2f
@@ -1511,7 +1143,7 @@ internal fun PdfPageComposable(
                     val qLeft = pxTl.toInt() / (tileSizePx / 2)
                     val qBottom = pyBr.toInt() / (tileSizePx / 2)
                     val qRight = pxBr.toInt() / (tileSizePx / 2)
-                    listOf(qTop, qLeft, qBottom, qRight, (observedScale * 10f).roundToInt())
+                    listOf(qTop, qLeft, qBottom, qRight, (observedScale * 10f).roundToInt(), pauseMarker)
                 } else {
                     null
                 }
@@ -1583,6 +1215,18 @@ internal fun PdfPageComposable(
                 val tilesToRecycleIds = currentTileIds - requiredTileIds
 
                 val duration = (System.nanoTime() - tileCalcStart) / 1_000_000f
+                val nowMs = System.currentTimeMillis()
+                val shouldLogHighResTile = isVerticalScroll || (!isVerticalScroll && renderScale > 1f)
+                val shouldLogTileSample = shouldLogHighResTile && nowMs - lastTileDiagLogMs >= PdfVerticalPerfLog.SAMPLE_INTERVAL_MS
+                val tileLogMode = if (isVerticalScroll) "vertical" else "pagination"
+                if (shouldLogTileSample) {
+                    lastTileDiagLogMs = nowMs
+                    PdfVerticalPerfLog.d(
+                        "tile-scan mode=$tileLogMode page=$pageIndex scale=${PdfVerticalPerfLog.f(renderScale)} scrolling=$latestIsScrolling pause=$latestShouldPauseHighResTileRendering auto=$latestIsAutoScrollPlaying " +
+                            "visible=$visibleBitmapRect required=${requiredTileIds.size} render=${tilesToRenderIds.size} recycle=${tilesToRecycleIds.size} " +
+                            "cached=${tiles.size} calcMs=${PdfVerticalPerfLog.f(duration)}"
+                    )
+                }
                 if (duration > 2f) {
                     Timber.tag("PdfPerformance").d(
                         "Page $pageIndex | Tile Calc took ${duration}ms | Tiles Needed: ${requiredTileIds.size}"
@@ -1597,16 +1241,43 @@ internal fun PdfPageComposable(
                     }
                 }
 
-                if (isScrolling && renderScale > 1f) {
+                if (latestShouldPauseHighResTileRendering && renderScale > 1f) {
+                    if (shouldLogTileSample) {
+                        PdfVerticalPerfLog.d(
+                            "tile-render-paused mode=$tileLogMode page=$pageIndex reason=motion scale=${PdfVerticalPerfLog.f(renderScale)} " +
+                                "missing=${tilesToRenderIds.size} current=${tiles.size}"
+                        )
+                    }
                     return@collectLatest
                 }
 
                 if (requiredTileIds != validCurrentTileIds) {
                     if (tilesToRenderIds.isNotEmpty()) {
+                        if (shouldLogHighResTile) {
+                            PdfVerticalPerfLog.d(
+                                "tile-render-queued mode=$tileLogMode page=$pageIndex missing=${tilesToRenderIds.size} scale=${PdfVerticalPerfLog.f(renderScale)} delay=${PDF_TILE_IDLE_RENDER_DELAY_MS}ms"
+                            )
+                        }
                         delay(PDF_TILE_IDLE_RENDER_DELAY_MS)
                         if (!isActive) return@collectLatest
-                        if (isScrolling && latestEffectiveScale > 1f) return@collectLatest
+                        if (latestShouldPauseHighResTileRendering && latestEffectiveScale > 1f) {
+                            if (shouldLogHighResTile) {
+                                PdfVerticalPerfLog.d(
+                                    "tile-render-canceled mode=$tileLogMode page=$pageIndex reason=motion-resumed missing=${tilesToRenderIds.size} scale=${PdfVerticalPerfLog.f(latestEffectiveScale)}"
+                                )
+                            }
+                            return@collectLatest
+                        }
+                        if (abs(latestEffectiveScale - renderScale) > PDF_TILE_SCALE_TOLERANCE) {
+                            if (shouldLogHighResTile) {
+                                PdfVerticalPerfLog.d(
+                                    "tile-render-canceled mode=$tileLogMode page=$pageIndex reason=scale-changed-before-native missing=${tilesToRenderIds.size} queuedScale=${PdfVerticalPerfLog.f(renderScale)} latestScale=${PdfVerticalPerfLog.f(latestEffectiveScale)}"
+                                )
+                            }
+                            return@collectLatest
+                        }
 
+                        val renderStartNanos = PdfVerticalPerfLog.nowNanos()
                         val renderedTiles = withContext(Dispatchers.IO) {
                             val newTiles = mutableListOf<PdfTile>()
                             tilesToRenderIds.forEach { tileId ->
@@ -1635,21 +1306,97 @@ internal fun PdfPageComposable(
                                 val tileRenderX = (col * tileSizePx * tileRenderScale).toInt()
                                 val tileRenderY = (row * tileSizePx * tileRenderScale).toInt()
 
-                                page?.renderPageBitmap(
-                                    bitmap = tileBitmap,
-                                    startX = -tileRenderX,
-                                    startY = -tileRenderY,
-                                    drawSizeX = fullPageRenderWidth,
-                                    drawSizeY = fullPageRenderHeight,
-                                    renderAnnot = true
-                                )
+                                val tilePage = page
+                                if (tilePage == null) {
+                                    PdfBitmapPool.recycle(tileBitmap)
+                                    return@forEach
+                                }
+
+                                var didRenderTile = false
+                                val tileRenderWaitStartNanos = PdfVerticalPerfLog.nowNanos()
+                                var singleTileStartNanos = tileRenderWaitStartNanos
+                                pdfHighResTileRenderMutex.withLock {
+                                    val tileRenderWaitMs = PdfVerticalPerfLog.elapsedMs(tileRenderWaitStartNanos)
+                                    if (shouldLogHighResTile && tileRenderWaitMs >= 16L) {
+                                        PdfVerticalPerfLog.d(
+                                            "tile-render-wait mode=$tileLogMode page=$pageIndex tile=$tileId duration=${tileRenderWaitMs}ms"
+                                        )
+                                    }
+                                    if (!isActive) return@withLock
+                                    if (latestShouldPauseHighResTileRendering && latestEffectiveScale > 1f) {
+                                        if (shouldLogHighResTile) {
+                                            PdfVerticalPerfLog.d(
+                                                "tile-render-canceled mode=$tileLogMode page=$pageIndex reason=motion-started-before-native tile=$tileId scale=${PdfVerticalPerfLog.f(latestEffectiveScale)}"
+                                            )
+                                        }
+                                        return@withLock
+                                    }
+                                    if (abs(latestEffectiveScale - renderScale) > PDF_TILE_SCALE_TOLERANCE) {
+                                        if (shouldLogHighResTile) {
+                                            PdfVerticalPerfLog.d(
+                                                "tile-render-canceled mode=$tileLogMode page=$pageIndex reason=scale-changed-at-native tile=$tileId queuedScale=${PdfVerticalPerfLog.f(renderScale)} latestScale=${PdfVerticalPerfLog.f(latestEffectiveScale)}"
+                                            )
+                                        }
+                                        return@withLock
+                                    }
+                                    singleTileStartNanos = PdfVerticalPerfLog.nowNanos()
+                                    tilePage.renderPageBitmap(
+                                        bitmap = tileBitmap,
+                                        startX = -tileRenderX,
+                                        startY = -tileRenderY,
+                                        drawSizeX = fullPageRenderWidth,
+                                        drawSizeY = fullPageRenderHeight,
+                                        renderAnnot = true
+                                    )
+                                    didRenderTile = true
+                                }
+                                if (!didRenderTile) {
+                                    PdfBitmapPool.recycle(tileBitmap)
+                                    return@forEach
+                                }
+                                val singleTileMs = PdfVerticalPerfLog.elapsedMs(singleTileStartNanos)
+                                if (shouldLogHighResTile && singleTileMs >= 16L) {
+                                    PdfVerticalPerfLog.d(
+                                        "tile-render-slow mode=$tileLogMode page=$pageIndex tile=$tileId duration=${singleTileMs}ms " +
+                                            "tileBitmap=${tileBitmap.width}x${tileBitmap.height} full=${fullPageRenderWidth}x$fullPageRenderHeight scale=${PdfVerticalPerfLog.f(tileRenderScale)}"
+                                    )
+                                }
 
                                 newTiles += PdfTile(tileBitmap, tileRect, tileId, renderScale)
                             }
                             newTiles
                         }
+                        val renderMs = PdfVerticalPerfLog.elapsedMs(renderStartNanos)
+                        if (shouldLogHighResTile) {
+                            PdfVerticalPerfLog.d(
+                                "tile-render-finished mode=$tileLogMode page=$pageIndex requested=${tilesToRenderIds.size} rendered=${renderedTiles.size} " +
+                                    "duration=${renderMs}ms scale=${PdfVerticalPerfLog.f(renderScale)} stillScrolling=$latestIsScrolling paused=$latestShouldPauseHighResTileRendering"
+                            )
+                        }
 
                         if (!isActive) {
+                            withContext(Dispatchers.IO) {
+                                renderedTiles.forEach { PdfBitmapPool.recycle(it.bitmap) }
+                            }
+                            return@collectLatest
+                        }
+                        if (renderedTiles.isNotEmpty() && latestShouldPauseHighResTileRendering && latestEffectiveScale > 1f) {
+                            if (shouldLogHighResTile) {
+                                PdfVerticalPerfLog.d(
+                                    "tile-render-discarded mode=$tileLogMode page=$pageIndex reason=motion-before-commit rendered=${renderedTiles.size} scale=${PdfVerticalPerfLog.f(latestEffectiveScale)}"
+                                )
+                            }
+                            withContext(Dispatchers.IO) {
+                                renderedTiles.forEach { PdfBitmapPool.recycle(it.bitmap) }
+                            }
+                            return@collectLatest
+                        }
+                        if (renderedTiles.isNotEmpty() && abs(latestEffectiveScale - renderScale) > PDF_TILE_SCALE_TOLERANCE) {
+                            if (shouldLogHighResTile) {
+                                PdfVerticalPerfLog.d(
+                                    "tile-render-discarded mode=$tileLogMode page=$pageIndex reason=scale-changed-before-commit rendered=${renderedTiles.size} queuedScale=${PdfVerticalPerfLog.f(renderScale)} latestScale=${PdfVerticalPerfLog.f(latestEffectiveScale)}"
+                                )
+                            }
                             withContext(Dispatchers.IO) {
                                 renderedTiles.forEach { PdfBitmapPool.recycle(it.bitmap) }
                             }
@@ -2585,6 +2332,10 @@ internal fun PdfPageComposable(
                                 waitForUpOrCancellation()
                             }
                         } catch (_: PointerEventTimeoutCancellationException) {
+                            if (latestIsOneHandZooming) {
+                                waitForUpOrCancellation()?.consume()
+                                return@awaitEachGesture
+                            }
                             down.consume()
                             Timber.d(
                                 "PointerInput: Long press detected at screen position ${down.position}"
@@ -2866,8 +2617,6 @@ internal fun PdfPageComposable(
             .pointerInput(
                 actualBitmapWidthPx,
                 actualBitmapHeightPx,
-                scale,
-                offset,
                 customMenuState,
                 selectionCharRange.value,
                 pageLinks,
@@ -2886,14 +2635,52 @@ internal fun PdfPageComposable(
                         selectedTool == InkType.TEXT ||
                         isStylusOnlyMode
 
-                if (!isTapDetectionAllowed) return@pointerInput
+                if (!isTapDetectionAllowed) {
+                    Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                        "page.detector.disabled page=$pageIndex vertical=$isVerticalScroll edit=$isEditMode " +
+                            "tool=$selectedTool stylusOnly=$isStylusOnlyMode"
+                    )
+                    return@pointerInput
+                }
 
-                detectTapGestures(onTap = { tapOffset ->
+                val oneHandZoomDistancePx = with(density) {
+                    PDF_ONE_HAND_ZOOM_DRAG_DISTANCE_FOR_DOUBLE_DP.dp.toPx()
+                }
+                var oneHandZoomStartScale = 1f
+                var oneHandZoomStartOffset = Offset.Zero
+
+                fun canZoomByDoubleTap(): Boolean {
+                    return (isZoomEnabled && !isVerticalScroll && !isScrollLocked && actualBitmapWidthPx > 0) ||
+                        (isVerticalScroll && !isScrollLocked && currentOnDoubleTap != null)
+                }
+
+                Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                    "page.detector.enabled page=$pageIndex vertical=$isVerticalScroll zoomEnabled=$isZoomEnabled " +
+                        "scrollLocked=$isScrollLocked bitmap=${actualBitmapWidthPx}x$actualBitmapHeightPx " +
+                        "scale=$latestScale offset=$latestOffset hasDoubleTap=${currentOnDoubleTap != null} " +
+                        "hasDragZoom=${currentOnDoubleTapDragZoom != null}"
+                )
+
+                detectPdfTapAndOneHandZoomGestures(
+                    viewConfiguration = viewConfiguration,
+                    canStartOneHandZoom = {
+                        (isZoomEnabled && !isVerticalScroll && !isScrollLocked && actualBitmapWidthPx > 0) ||
+                            (isVerticalScroll && !isScrollLocked && currentOnDoubleTapDragZoom != null)
+                    },
+                    canHandleQuickDoubleTap = { canZoomByDoubleTap() },
+                    consumeSingleTap = true,
+                    onTap = tapDetector@{ tapOffset ->
+                    Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                        "page.onTap page=$pageIndex vertical=$isVerticalScroll offset=$tapOffset"
+                    )
                     if (currentOnPreSingleTap?.invoke(tapOffset) == true) {
-                        return@detectTapGestures
+                        Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                            "page.onTap.preSingleTapConsumed page=$pageIndex vertical=$isVerticalScroll"
+                        )
+                        return@tapDetector
                     }
 
-                    val tapInContentCoords = screenToContentCoordinates(tapOffset)
+                    val tapInContentCoords = latestScreenToContentCoordinates(tapOffset)
                     val tapXInBitmap = tapInContentCoords.x
                     val tapYInBitmap = tapInContentCoords.y
                     val isWithinContentBounds =
@@ -2901,8 +2688,12 @@ internal fun PdfPageComposable(
                             tapYInBitmap in 0f..actualBitmapHeightPx.toFloat()
 
                     if (!isWithinContentBounds) {
+                        Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                            "page.onTap.outsideContent page=$pageIndex vertical=$isVerticalScroll " +
+                                "bitmapTap=(${tapXInBitmap.toInt()},${tapYInBitmap.toInt()})"
+                        )
                         currentOnSingleTap(tapOffset)
-                        return@detectTapGestures
+                        return@tapDetector
                     }
 
                     Timber.tag("BubbleZoom").d("Tap inside bounds. modeActive=$currentBubbleZoomModeActive, detectedBubbles=${currentDetectedBubbles.size}, tapPos=($tapXInBitmap, $tapYInBitmap)")
@@ -2925,10 +2716,10 @@ internal fun PdfPageComposable(
                             } else {
                                 tappedBubbleIndex
                             }
-                            return@detectTapGestures
+                            return@tapDetector
                         } else if (currentExpandedBubbleIndex != -1) {
                             expandedBubbleIndex = -1
-                            return@detectTapGestures
+                            return@tapDetector
                         }
                     }
 
@@ -2936,44 +2727,28 @@ internal fun PdfPageComposable(
                         val nativeResult = withContext(Dispatchers.IO) {
                             try {
                                 pdfDocumentItem.openPage(pdfPageIndex)?.use { page ->
-                                    val pagePtr = page.getNativePointer()
+                                    val nativeTap = (page as? PdfPageWrapper)?.resolveNativeTap(
+                                        documentWrapper = pdfDocumentItem as? PdfDocumentWrapper,
+                                        bitmapWidthPx = actualBitmapWidthPx,
+                                        bitmapHeightPx = actualBitmapHeightPx,
+                                        pageRotation = currentPageRotation,
+                                        deviceX = tapInContentCoords.x.toInt(),
+                                        deviceY = tapInContentCoords.y.toInt()
+                                    ) ?: return@withContext 0
 
-                                    if (pagePtr == 0L) {
+                                    if (!nativeTap.resolvedNativePointer) {
                                         Timber.tag("PdfInteraction").e("Could not find native pointer for page $pdfPageIndex")
                                         return@withContext 0
                                     }
 
-                                    val pdfCoords = page.mapDeviceCoordsToPage(
-                                        0, 0, actualBitmapWidthPx, actualBitmapHeightPx,
-                                        currentPageRotation, tapInContentCoords.x.toInt(), tapInContentCoords.y.toInt()
-                                    )
-
-                                    val docPtr = try {
-                                        val pdfDocKt = (pdfDocumentItem as? PdfDocumentWrapper)?.pdfDocument
-                                        if (pdfDocKt != null) {
-                                            val documentField = pdfDocKt.javaClass.getDeclaredField("document").apply { isAccessible = true }
-                                            val docUInstance = documentField.get(pdfDocKt)
-                                            if (docUInstance != null) {
-                                                val ptrField = docUInstance.javaClass.getDeclaredField("mNativeDocPtr").apply { isAccessible = true }
-                                                ptrField.get(docUInstance) as Long
-                                            } else 0L
-                                        } else 0L
-                                    } catch (e: Exception) { 0L }
-
-                                    Timber.tag("PdfLinkDiagnostic").i("Extracted docPtr: $docPtr | pagePtr: $pagePtr")
-
-                                    val linkInfo = PdfiumEngineProvider.bridge.getLinkInfoAtPoint(
-                                        docPtr, pagePtr, pdfCoords.x.toDouble(), pdfCoords.y.toDouble()
-                                    )
-
-                                    if (linkInfo != null) {
-                                        Timber.tag("PdfLinkDiagnostic").i(">>> Native Link Info Extracted: $linkInfo")
-                                        if (linkInfo.startsWith("URI:")) {
-                                            val url = linkInfo.substringAfter("URI:")
+                                    if (nativeTap.linkInfo != null) {
+                                        Timber.tag("PdfLinkDiagnostic").i(">>> Native Link Info Extracted: ${nativeTap.linkInfo}")
+                                        if (nativeTap.linkInfo.startsWith("URI:")) {
+                                            val url = nativeTap.linkInfo.substringAfter("URI:")
                                             withContext(Dispatchers.Main) { onLinkClicked(url) }
                                             return@withContext 1
-                                        } else if (linkInfo.startsWith("PAGE:")) {
-                                            val targetPage = linkInfo.substringAfter("PAGE:").toIntOrNull()
+                                        } else if (nativeTap.linkInfo.startsWith("PAGE:")) {
+                                            val targetPage = nativeTap.linkInfo.substringAfter("PAGE:").toIntOrNull()
                                             if (targetPage != null && targetPage >= 0) {
                                                 withContext(Dispatchers.Main) { onInternalLinkClicked(targetPage) }
                                                 return@withContext 1
@@ -2981,8 +2756,7 @@ internal fun PdfPageComposable(
                                         }
                                     }
 
-                                    val clickHandled = PdfiumEngineProvider.bridge.performClick(pagePtr, pdfCoords.x.toDouble(), pdfCoords.y.toDouble())
-                                    if (clickHandled) {
+                                    if (nativeTap.clickHandled) {
                                         return@withContext 2
                                     }
                                     return@withContext 0
@@ -2994,6 +2768,9 @@ internal fun PdfPageComposable(
                         }
 
                         if (nativeResult == 2) {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                "page.onTap.nativeAction page=$pageIndex vertical=$isVerticalScroll"
+                            )
                             Timber.tag("PdfInteraction").i("Action detected. Refreshing page.")
                             tiles = emptyList()
                             bitmapState = null
@@ -3001,11 +2778,14 @@ internal fun PdfPageComposable(
                             currentRenderedPageId = "ACTION_${System.currentTimeMillis()}"
                             return@launch
                         } else if (nativeResult == 1) {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                "page.onTap.nativeLink page=$pageIndex vertical=$isVerticalScroll"
+                            )
                             return@launch
                         }
 
-                        val annotHitTolerance = with(density) { 24.dp.toPx() } / inputScale
-                        val hitTolerance = with(density) { 16.dp.toPx() } / inputScale
+                        val annotHitTolerance = with(density) { 24.dp.toPx() } / latestInputScale
+                        val hitTolerance = with(density) { 16.dp.toPx() } / latestInputScale
 
                         Timber.d("detectTapGestures: Tap at bitmap coords (${tapXInBitmap.toInt()}, ${tapYInBitmap.toInt()})")
 
@@ -3044,6 +2824,9 @@ internal fun PdfPageComposable(
                         }
 
                         if (standardHit != null) {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                "page.onTap.annotationHit page=$pageIndex vertical=$isVerticalScroll"
+                            )
                             val (annot, screenRect) = standardHit
                             customMenuState = CustomPdfMenuState(
                                 selectedText = annot.contents ?: "No comment",
@@ -3057,6 +2840,9 @@ internal fun PdfPageComposable(
                         }
 
                         if (hitHighlightPair != null && tappedRect != null) {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                "page.onTap.highlightHit page=$pageIndex vertical=$isVerticalScroll"
+                            )
                             val hitHighlight = hitHighlightPair.first
                             onNoteRequested(hitHighlight.id)
                             return@launch
@@ -3067,6 +2853,10 @@ internal fun PdfPageComposable(
                         }
 
                         if (clickedLink != null) {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                "page.onTap.fallbackLink page=$pageIndex vertical=$isVerticalScroll " +
+                                    "dest=${clickedLink.destPageIdx} url=${clickedLink.url != null}"
+                            )
                             Timber.d("PdfPageComposable: Fallback pageLinks intercepted click.")
                             if (clickedLink.destPageIdx != null && clickedLink.destPageIdx >= 0) {
                                 onInternalLinkClicked(clickedLink.destPageIdx)
@@ -3080,6 +2870,10 @@ internal fun PdfPageComposable(
                         val wasSelectionVisible = selectionCharRange.value != null || ocrSelectionSymbolIndices != null
 
                         if (wasMenuVisible || wasSelectionVisible) {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                "page.onTap.clearSelectionOrMenu page=$pageIndex vertical=$isVerticalScroll " +
+                                    "menu=$wasMenuVisible selection=$wasSelectionVisible"
+                            )
                             customMenuState = null
                             selectionCharRange.value = null
                             ocrSelectionSymbolIndices = null
@@ -3092,64 +2886,147 @@ internal fun PdfPageComposable(
                                 currentPageRotation,
                             )
                         } else {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                "page.onTap.singleTap page=$pageIndex vertical=$isVerticalScroll"
+                            )
                             currentOnSingleTap(tapOffset)
                         }
                     }
-                }, onDoubleTap = { tapOffset ->
+                },
+                    onQuickDoubleTap = quickDoubleTap@{ tapOffset ->
+                    if (!canZoomByDoubleTap()) {
+                        Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                            "page.quickDoubleTap.blocked page=$pageIndex vertical=$isVerticalScroll " +
+                                "zoomEnabled=$isZoomEnabled scrollLocked=$isScrollLocked bitmapWidth=$actualBitmapWidthPx"
+                        )
+                        return@quickDoubleTap
+                    }
+                    Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                        "page.quickDoubleTap page=$pageIndex vertical=$isVerticalScroll offset=$tapOffset " +
+                            "scale=$latestScale"
+                    )
                     if (isZoomEnabled && !isVerticalScroll && !isScrollLocked) {
-                        if (actualBitmapWidthPx == 0) return@detectTapGestures
+                        if (actualBitmapWidthPx == 0) return@quickDoubleTap
                         coroutineScope.launch {
-                            val startScale = scale
+                            val startScale = latestScale
                             val targetScale = if (startScale > 1.1f) 1f else 2.5f
 
-                            val startOffset = offset
-                            val targetOffsetUnbounded = if (targetScale <= 1.1f) {
+                            val startOffset = latestOffset
+                            val viewportSize = Size(size.width.toFloat(), size.height.toFloat())
+                            val contentSize = Size(
+                                actualBitmapWidthPx.toFloat(),
+                                actualBitmapHeightPx.toFloat()
+                            )
+                            val targetOffset = if (targetScale <= 1.1f) {
                                 Offset.Zero
                             } else {
-                                val ratio = targetScale / startScale
-                                val screenCenter = Offset(
-                                    size.width / 2f, size.height / 2f
+                                centeredPdfCameraOffsetForScaleChange(
+                                    previousScale = startScale,
+                                    nextScale = targetScale,
+                                    previousOffset = startOffset,
+                                    pivot = tapOffset,
+                                    viewportSize = viewportSize,
+                                    contentSize = contentSize
                                 )
-                                startOffset * ratio + (tapOffset - screenCenter) * (1 - ratio)
                             }
 
-                            val contentWidth = actualBitmapWidthPx * targetScale
-                            val contentHeight = actualBitmapHeightPx * targetScale
-                            val maxOffsetX = (contentWidth - size.width).coerceAtLeast(0f) / 2f
-                            val maxOffsetY = (contentHeight - size.height).coerceAtLeast(0f) / 2f
-
-                            val targetOffset = Offset(
-                                x = targetOffsetUnbounded.x.coerceIn(
-                                    -maxOffsetX, maxOffsetX
-                                ), y = targetOffsetUnbounded.y.coerceIn(
-                                    -maxOffsetY, maxOffsetY
-                                )
-                            )
-
-                            Animatable(0f).animateTo(
-                                1f, animationSpec = tween(
-                                    durationMillis = 300
-                                )
-                            ) {
-                                val progress = value
-                                scale = androidx.compose.ui.util.lerp(
-                                    startScale, targetScale, progress
-                                )
-                                offset = androidx.compose.ui.geometry.lerp(
-                                    startOffset, targetOffset, progress
-                                )
-                                onScaleChanged(scale)
-                            }
-                            if (scale <= 1.05f) {
-                                scale = 1f
-                                offset = Offset.Zero
-                                onScaleChanged(scale)
+                            try {
+                                isTransforming = true
+                                Animatable(0f).animateTo(
+                                    1f, animationSpec = tween(
+                                        durationMillis = 300
+                                    )
+                                ) {
+                                    val progress = value
+                                    scale = androidx.compose.ui.util.lerp(
+                                        startScale, targetScale, progress
+                                    )
+                                    offset = androidx.compose.ui.geometry.lerp(
+                                        startOffset, targetOffset, progress
+                                    )
+                                    onScaleChanged(scale)
+                                }
+                                if (scale <= 1.05f) {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                    onScaleChanged(scale)
+                                }
+                            } finally {
+                                isTransforming = false
                             }
                         }
                     } else if (isVerticalScroll && !isScrollLocked && currentOnDoubleTap != null) {
                         currentOnDoubleTap!!(tapOffset)
                     }
-                })
+                },
+                    onOneHandZoomHoldStart = { _ ->
+                        Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                            "page.oneHandHoldStart page=$pageIndex vertical=$isVerticalScroll " +
+                                "scale=$latestScale offset=$latestOffset scrollLocked=$isScrollLocked"
+                        )
+                        isOneHandZooming = true
+                        if (isZoomEnabled && !isVerticalScroll && !isScrollLocked && actualBitmapWidthPx > 0) {
+                            paginationPanFlingJob?.cancel()
+                            paginationPanFlingJob = null
+                            oneHandZoomStartScale = latestScale
+                            oneHandZoomStartOffset = latestOffset
+                            isPaginationPageGestureActive = true
+                        } else if (isVerticalScroll && !isScrollLocked) {
+                            currentOnDoubleTapDragZoomStart?.invoke(Offset(size.width / 2f, size.height / 2f))
+                        }
+                    },
+                    onOneHandZoom = { _, totalDragY ->
+                        if (isZoomEnabled && !isVerticalScroll && !isScrollLocked && actualBitmapWidthPx > 0) {
+                            val pivot = Offset(size.width / 2f, size.height / 2f)
+                            val newScale = pdfOneHandZoomScale(
+                                startScale = oneHandZoomStartScale,
+                                totalDragY = totalDragY,
+                                dragDistanceForDoublePx = oneHandZoomDistancePx,
+                                minScale = 1f,
+                                maxScale = 4f
+                            )
+                            val viewportSize = Size(size.width.toFloat(), size.height.toFloat())
+                            val contentSize = Size(
+                                actualBitmapWidthPx.toFloat(),
+                                actualBitmapHeightPx.toFloat()
+                            )
+                            scale = newScale
+                            offset = centeredPdfCameraOffsetForScaleChange(
+                                previousScale = oneHandZoomStartScale,
+                                nextScale = newScale,
+                                previousOffset = oneHandZoomStartOffset,
+                                pivot = pivot,
+                                viewportSize = viewportSize,
+                                contentSize = contentSize
+                            )
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).v(
+                                "page.oneHandUpdate page=$pageIndex dragY=$totalDragY scale=$newScale offset=$offset"
+                            )
+                            onScaleChanged(scale)
+                        } else if (isVerticalScroll && !isScrollLocked) {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).v(
+                                "page.oneHandUpdate.verticalForward page=$pageIndex dragY=$totalDragY"
+                            )
+                            currentOnDoubleTapDragZoom?.invoke(Offset(size.width / 2f, size.height / 2f), totalDragY)
+                        }
+                    },
+                    onOneHandZoomEnd = { _ ->
+                        Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                            "page.oneHandEnd page=$pageIndex vertical=$isVerticalScroll scale=$scale offset=$offset"
+                        )
+                        if (isZoomEnabled && !isVerticalScroll && !isScrollLocked && actualBitmapWidthPx > 0) {
+                            if (scale > 1f && scale < 1.05f) {
+                                scale = 1f
+                                offset = Offset.Zero
+                                onScaleChanged(scale)
+                            }
+                            isPaginationPageGestureActive = false
+                        } else if (isVerticalScroll && !isScrollLocked) {
+                            currentOnDoubleTapDragZoomEnd?.invoke()
+                        }
+                        isOneHandZooming = false
+                    }
+                )
             }
             .pointerInput(
                 actualBitmapWidthPx,
@@ -3159,9 +3036,10 @@ internal fun PdfPageComposable(
                 isVerticalScroll,
                 isEditMode,
                 onTwoFingerSwipe,
-                isScrollLocked
+                isScrollLocked,
+                isOneHandZooming
             ) {
-                if (!isZoomEnabled || isVerticalScroll || actualBitmapWidthPx == 0 || activeDraggingHandle != null) return@pointerInput
+                if (!isZoomEnabled || isVerticalScroll || actualBitmapWidthPx == 0 || activeDraggingHandle != null || isOneHandZooming) return@pointerInput
 
                 val decay = splineBasedDecay<Float>(this)
                 val velocityTracker = VelocityTracker()
@@ -3170,6 +3048,12 @@ internal fun PdfPageComposable(
                 awaitEachGesture {
                     @Suppress("UnusedVariable", "Unused") val down =
                         awaitFirstDown(requireUnconsumed = false)
+                    Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                        "page.panDetector.down page=$pageIndex consumed=${down.isConsumed} " +
+                            "scale=$scale offset=$offset scrollLocked=$isScrollLocked"
+                    )
+                    isPaginationPageGestureActive = true
+                    try {
                     paginationPanFlingJob?.cancel()
                     paginationPanFlingJob = null
                     velocityTracker.resetTracking()
@@ -3184,6 +3068,15 @@ internal fun PdfPageComposable(
                         val event = awaitPointerEvent()
                         val canceled = event.changes.any { it.isConsumed }
                         val pointerCount = event.changes.size
+
+                        if (canceled) {
+                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                "page.panDetector.canceledByConsumed page=$pageIndex mode=$mode scale=$scale " +
+                                    "pointerCount=$pointerCount changes=${event.changes.joinToString { change ->
+                                        "pressed=${change.pressed},consumed=${change.isConsumed},moved=${change.positionChanged()}"
+                                    }}"
+                            )
+                        }
 
                         if (!canceled) {
                             val rawPanChange = event.calculatePan()
@@ -3200,6 +3093,9 @@ internal fun PdfPageComposable(
                                         accumulatedPan += panChange
                                         if (accumulatedPan.getDistance() > touchSlop) {
                                             mode = 1
+                                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                                "page.panDetector.modePanSingle page=$pageIndex accumulatedPan=$accumulatedPan scale=$scale"
+                                            )
                                             Timber.tag("PdfZoomDebug").d("Mode Change: PAN (Single Pointer)")
                                         }
                                     } else if (pointerCount > 1) {
@@ -3211,9 +3107,15 @@ internal fun PdfPageComposable(
 
                                         if (zoomDiff > 0.05f) {
                                             mode = 2
+                                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                                "page.panDetector.modeZoomMulti page=$pageIndex zoomDiff=$zoomDiff panDist=$panDist scale=$scale"
+                                            )
                                             Timber.tag("PdfZoomDebug").d("Mode Change: ZOOM (Multi Pointer)")
                                         } else if (panDist > touchSlop) {
                                             mode = 1
+                                            Timber.tag(PDF_ONE_HAND_ZOOM_TRACE_TAG).d(
+                                                "page.panDetector.modePanMulti page=$pageIndex zoomDiff=$zoomDiff panDist=$panDist scale=$scale"
+                                            )
                                             Timber.tag("PdfZoomDebug").d("Mode Change: PAN (Multi Pointer)")
                                         }
                                     }
@@ -3347,12 +3249,17 @@ internal fun PdfPageComposable(
 
                     if (scale > 1f && scale < 1.05f) {
                         coroutineScope.launch {
-                            val startScale = scale
-                            val startOffset = offset
-                            Animatable(0f).animateTo(1f) {
-                                scale = lerp(startScale, 1f, value)
-                                offset = lerp(startOffset, Offset.Zero, value)
-                                onScaleChanged(scale)
+                            try {
+                                isTransforming = true
+                                val startScale = scale
+                                val startOffset = offset
+                                Animatable(0f).animateTo(1f) {
+                                    scale = lerp(startScale, 1f, value)
+                                    offset = lerp(startOffset, Offset.Zero, value)
+                                    onScaleChanged(scale)
+                                }
+                            } finally {
+                                isTransforming = false
                             }
                         }
                     } else if (mode == 1 && scale > 1f) {
@@ -3407,6 +3314,9 @@ internal fun PdfPageComposable(
                                 }
                             }
                         }
+                    }
+                    } finally {
+                        isPaginationPageGestureActive = false
                     }
                 }
             }
@@ -3832,6 +3742,7 @@ internal fun PdfPageComposable(
                 currentRenderedPageId
             ) {
                 if (!isVisible && !isVerticalScroll) return@LaunchedEffect
+                val baseRenderEffectStartNanos = PdfVerticalPerfLog.nowNanos()
                 pageErrorMessage = null
 
                 val viewContainerWidthPx = with(density) { currentContainerMaxWidth.toPx().toInt() }
@@ -3870,6 +3781,11 @@ internal fun PdfPageComposable(
                         bitmapState != null &&
                         currentRenderedPageId == targetPageId
                     ) {
+                        if (isVerticalScroll) {
+                            PdfVerticalPerfLog.d(
+                                "base-render-skip page=$pageIndex reason=current virtual=true logical=${scaledWidth}x$scaledHeight"
+                            )
+                        }
                         isLoadingPage = false
                         return@LaunchedEffect
                     }
@@ -3904,6 +3820,12 @@ internal fun PdfPageComposable(
                     currentRenderedPageId = targetPageId
 
                     isLoadingPage = false
+                    if (isVerticalScroll) {
+                        PdfVerticalPerfLog.d(
+                            "base-render-finished page=$pageIndex virtual=true logical=${scaledWidth}x$scaledHeight bitmap=${baseW}x$baseH " +
+                                "duration=${PdfVerticalPerfLog.elapsedMs(baseRenderEffectStartNanos)}ms"
+                        )
+                    }
                     return@LaunchedEffect
                 }
 
@@ -3949,6 +3871,11 @@ internal fun PdfPageComposable(
                                     bitmapState != null &&
                                     currentRenderedPageId == targetPageId
                                 ) {
+                                    if (isVerticalScroll) {
+                                        PdfVerticalPerfLog.d(
+                                            "base-render-skip page=$pageIndex pdfPage=$pdfPageIndex reason=current logical=${scaledWidth}x$scaledHeight"
+                                        )
+                                    }
                                     return@withContext null
                                 }
 
@@ -3968,14 +3895,27 @@ internal fun PdfPageComposable(
                                 Timber.d(
                                     "Rendering page $pageIndex at ${baseW}x${baseH} (logical: ${scaledWidth}x${scaledHeight})"
                                 )
+                                if (isVerticalScroll) {
+                                    PdfVerticalPerfLog.d(
+                                        "base-render-start page=$pageIndex pdfPage=$pdfPageIndex logical=${scaledWidth}x$scaledHeight " +
+                                            "bitmap=${baseW}x$baseH rotation=$rotation externalScale=${PdfVerticalPerfLog.f(externalScale)}"
+                                    )
+                                }
                                 val newBitmap = createBitmap(baseW, baseH)
                                 localBitmap = newBitmap
+                                val nativeRenderStartNanos = PdfVerticalPerfLog.nowNanos()
                                 page.renderPageBitmap(
                                     newBitmap,
                                     0, 0,
                                     baseW, baseH,
                                     true
                                 )
+                                val nativeRenderMs = PdfVerticalPerfLog.elapsedMs(nativeRenderStartNanos)
+                                if (isVerticalScroll) {
+                                    PdfVerticalPerfLog.d(
+                                        "base-render-native page=$pageIndex pdfPage=$pdfPageIndex duration=${nativeRenderMs}ms bitmap=${baseW}x$baseH"
+                                    )
+                                }
 
                                 Triple(newBitmap, rotation, Pair(scaledWidth, scaledHeight))
                             } finally {
@@ -4012,9 +3952,20 @@ internal fun PdfPageComposable(
                                     )
                                 }
                             }
+                            if (isVerticalScroll) {
+                                PdfVerticalPerfLog.d(
+                                    "base-render-finished page=$pageIndex pdfPage=$pdfPageIndex logical=${dims.first}x${dims.second} " +
+                                        "bitmap=${newBitmap.width}x${newBitmap.height} rotation=$rotation duration=${PdfVerticalPerfLog.elapsedMs(baseRenderEffectStartNanos)}ms"
+                                )
+                            }
                         }
                     } catch (e: Exception) {
                         if (e is CancellationException) throw e
+                        if (isVerticalScroll) {
+                            PdfVerticalPerfLog.w(
+                                "base-render-error page=$pageIndex pdfPage=$pdfPageIndex error=${e.readablePdfErrorDetail()}"
+                            )
+                        }
                         pageErrorMessage = context.getString(
                             R.string.error_processing_page,
                             e.readablePdfErrorDetail()
@@ -4089,10 +4040,21 @@ internal fun PdfPageComposable(
                     val stableTiles = remember(tiles) { StableHolder(tiles) }
                     val stableColorFilter = remember(colorFilter) { StableHolder(colorFilter) }
                     val stableImageRects = remember(imageScreenRects) { StableHolder(imageScreenRects) }
+                    val shouldDrawHighResTiles = !shouldPauseHighResTileRendering
+                    LaunchedEffect(shouldDrawHighResTiles, stableTiles.item.size, effectiveScale) {
+                        if (stableTiles.item.isNotEmpty() && effectiveScale > 1f) {
+                            PdfVerticalPerfLog.d(
+                                "tile-display mode=${if (isVerticalScroll) "vertical" else "pagination"} page=$pageIndex " +
+                                    "visible=$shouldDrawHighResTiles tiles=${stableTiles.item.size} pause=$shouldPauseHighResTileRendering " +
+                                    "scale=${PdfVerticalPerfLog.f(effectiveScale)}"
+                            )
+                        }
+                    }
 
                     val staticData = remember(
                         stableBitmapState,
                         stableTiles,
+                        shouldDrawHighResTiles,
                         effectiveScale,
                         centeringOffsetX,
                         centeringOffsetY,
@@ -4114,6 +4076,7 @@ internal fun PdfPageComposable(
                         PageStaticData(
                             bitmap = stableBitmapState,
                             tiles = stableTiles,
+                            shouldDrawHighResTiles = shouldDrawHighResTiles,
                             effectiveScale = effectiveScale,
                             centeringOffsetX = centeringOffsetX,
                             centeringOffsetY = centeringOffsetY,
@@ -4483,6 +4446,7 @@ private fun OcrProcessingIndicator(position: Offset) {
 private fun PdfBitmapLayer(
     bitmapState: Bitmap?,
     tiles: List<PdfTile>,
+    shouldDrawHighResTiles: Boolean,
     effectiveScale: Float,
     centeringOffsetX: Float,
     centeringOffsetY: Float,
@@ -4550,7 +4514,7 @@ private fun PdfBitmapLayer(
                     }
 
                     val needsTiling = effectiveScale > 1f || targetWidth > 3000 || targetHeight > 3000
-                    if (needsTiling) {
+                    if (needsTiling && shouldDrawHighResTiles) {
                         tiles.forEach { tile ->
                             if (
                                 tile.bitmap.isCanvasSafeBitmap(
@@ -4800,212 +4764,6 @@ private fun PdfHighlightsLayer(
     }
 }
 
-internal object PdfTextureGenerator {
-    private var noiseBitmap: Bitmap? = null
-
-    fun getNoiseTexture(): Bitmap {
-        if (noiseBitmap == null) {
-            val size = 256
-            val bitmap = createBitmap(size, size, Bitmap.Config.ARGB_8888)
-            for (x in 0 until size) {
-                for (y in 0 until size) {
-                    val isGrain = Math.random() > 0.4
-                    if (isGrain) {
-                        val alpha = (Math.random() * 100 + 100).toInt()
-                        bitmap[x, y] = AndroidColor.argb(alpha, 0, 0, 0)
-                    } else {
-                        bitmap[x, y] = AndroidColor.TRANSPARENT
-                    }
-                }
-            }
-            noiseBitmap = bitmap
-        }
-        return noiseBitmap!!
-    }
-}
-
-internal sealed interface AnnotationRenderData {
-    data class Standard(
-        val path: Path,
-        val color: Color,
-        val strokeWidth: Float,
-        val cap: StrokeCap,
-        val blendMode: BlendMode
-    ) : AnnotationRenderData
-
-    data class Fountain(val path: Path, val color: Color) : AnnotationRenderData
-
-    data class Pencil(
-        val path: android.graphics.Path,
-        val color: Color,
-        val strokeWidth: Float,
-        val velocityAlpha: Float
-    ) : AnnotationRenderData
-}
-
-internal object PdfAnnotationRenderHelper {
-    fun createRenderData(annot: PdfAnnotation, widthPx: Int, heightPx: Int): AnnotationRenderData? {
-        val startTime = System.nanoTime()
-        if (annot.points.isEmpty()) return null
-
-        if (annot.points.size == 1) {
-            val p = annot.points[0]
-            val x = p.x * widthPx
-            val y = p.y * heightPx
-
-            val path = if (annot.inkType == InkType.PENCIL) android.graphics.Path() else Path()
-
-            if (path is android.graphics.Path) {
-                path.moveTo(x, y)
-                path.lineTo(x, y)
-                return AnnotationRenderData.Pencil(
-                    path = path,
-                    color = annot.color,
-                    strokeWidth = annot.strokeWidth * widthPx,
-                    velocityAlpha = 1.0f
-                )
-            } else if (path is Path) {
-                if (annot.inkType == InkType.FOUNTAIN_PEN) {
-                    val radius = (annot.strokeWidth * widthPx) / 2f
-                    path.addOval(
-                        androidx.compose.ui.geometry.Rect(
-                            center = Offset(x, y), radius = radius
-                        )
-                    )
-                    return AnnotationRenderData.Fountain(path = path, color = annot.color)
-                }
-
-                path.moveTo(x, y)
-                path.lineTo(x, y)
-
-                val cap = when (annot.inkType) {
-                    InkType.HIGHLIGHTER -> StrokeCap.Butt
-                    InkType.HIGHLIGHTER_ROUND -> StrokeCap.Round
-                    else -> StrokeCap.Round
-                }
-
-                val blendMode = BlendMode.SrcOver
-
-                return AnnotationRenderData.Standard(
-                    path = path,
-                    color = annot.color,
-                    strokeWidth = annot.strokeWidth * widthPx,
-                    cap = cap,
-                    blendMode = blendMode
-                )
-            }
-        }
-
-        val result = when (annot.inkType) {
-            InkType.PENCIL -> {
-                val path = android.graphics.Path()
-                val first = annot.points[0]
-                path.moveTo(first.x * widthPx, first.y * heightPx)
-                var totalDist = 0f
-                for (i in 1 until annot.points.size) {
-                    val p0 = annot.points[i - 1]
-                    val p1 = annot.points[i]
-                    val p0x = p0.x * widthPx
-                    val p0y = p0.y * heightPx
-                    val p1x = p1.x * widthPx
-                    val p1y = p1.y * heightPx
-                    val midX = (p0x + p1x) / 2f
-                    val midY = (p0y + p1y) / 2f
-                    val dx = p1x - p0x
-                    val dy = p1y - p0y
-                    totalDist += sqrt(dx * dx + dy * dy)
-
-                    if (i == 1) path.lineTo(midX, midY)
-                    else path.quadTo(p0x, p0y, midX, midY)
-                }
-                val last = annot.points.last()
-                path.lineTo(last.x * widthPx, last.y * heightPx)
-
-                val duration =
-                    (annot.points.last().timestamp - annot.points.first().timestamp).coerceAtLeast(1)
-                val velocity = totalDist / duration
-                val velocityAlphaFactor = (1f - (velocity - 0.2f) / 1.8f).coerceIn(0.4f, 1.0f)
-
-                AnnotationRenderData.Pencil(
-                    path = path,
-                    color = annot.color,
-                    strokeWidth = annot.strokeWidth * widthPx,
-                    velocityAlpha = velocityAlphaFactor
-                )
-            }
-
-            InkType.FOUNTAIN_PEN -> {
-                val baseStrokeWidth = annot.strokeWidth * widthPx
-                val path = Path()
-
-                val (leftSide, rightSide) = PdfInkGeometry.calculateFountainPenPoints(
-                    annot.points, baseStrokeWidth, widthPx.toFloat(), heightPx.toFloat()
-                )
-
-                if (leftSide.isNotEmpty()) {
-                    path.moveTo(leftSide[0].x, leftSide[0].y)
-
-                    for (i in 1 until leftSide.size) {
-                        path.lineTo(leftSide[i].x, leftSide[i].y)
-                    }
-
-                    for (i in rightSide.size - 1 downTo 0) {
-                        path.lineTo(rightSide[i].x, rightSide[i].y)
-                    }
-
-                    path.close()
-                }
-
-                AnnotationRenderData.Fountain(path = path, color = annot.color)
-            }
-
-            else -> {
-                val path = Path()
-                val first = annot.points[0]
-                path.moveTo(first.x * widthPx, first.y * heightPx)
-                for (i in 1 until annot.points.size) {
-                    val p0 = annot.points[i - 1]
-                    val p1 = annot.points[i]
-                    val p0x = p0.x * widthPx
-                    val p0y = p0.y * heightPx
-                    val p1x = p1.x * widthPx
-                    val p1y = p1.y * heightPx
-                    val midX = (p0x + p1x) / 2f
-                    val midY = (p0y + p1y) / 2f
-                    if (i == 1) path.lineTo(midX, midY)
-                    else path.quadraticTo(p0x, p0y, midX, midY)
-                }
-                val last = annot.points.last()
-                path.lineTo(last.x * widthPx, last.y * heightPx)
-
-                val blendMode = when (annot.inkType) {
-                    InkType.HIGHLIGHTER, InkType.HIGHLIGHTER_ROUND -> BlendMode.Multiply
-                    else -> BlendMode.SrcOver
-                }
-
-                val cap = when (annot.inkType) {
-                    InkType.HIGHLIGHTER -> StrokeCap.Butt
-                    InkType.HIGHLIGHTER_ROUND -> StrokeCap.Round
-                    else -> StrokeCap.Round
-                }
-
-                AnnotationRenderData.Standard(
-                    path = path,
-                    color = annot.color,
-                    strokeWidth = annot.strokeWidth * widthPx,
-                    cap = cap,
-                    blendMode = blendMode
-                )
-            }
-        }
-        val duration = (System.nanoTime() - startTime) / 1_000_000f
-        if (duration > 1f) {
-            Timber.tag("PdfPerf").v("Path Gen: Type=${annot.inkType}, Pts=${annot.points.size}, Time=${duration}ms")
-        }
-        return result
-    }
-}
-
 @Suppress("SameParameterValue")
 @Composable
 private fun PdfAnnotationLayer(
@@ -5127,6 +4885,7 @@ private fun PdfPageStaticLayer(data: PageStaticData) {
     PdfBitmapLayer(
         bitmapState = data.bitmap.item,
         tiles = data.tiles.item,
+        shouldDrawHighResTiles = data.shouldDrawHighResTiles,
         effectiveScale = data.effectiveScale,
         centeringOffsetX = data.centeringOffsetX,
         centeringOffsetY = data.centeringOffsetY,
@@ -5872,53 +5631,6 @@ private fun PdfPageRenderer(
                     }
                 }
             }
-        }
-    }
-}
-
-@Stable
-class PdfDrawingState {
-    var currentAnnotation by mutableStateOf<PdfAnnotation?>(null)
-        private set
-    private val currentPoints = mutableListOf<PdfPoint>()
-
-    fun onDrawStart(pageIndex: Int, point: PdfPoint, type: InkType, color: Color, width: Float) {
-        currentPoints.clear()
-        currentPoints.add(point)
-        currentAnnotation = PdfAnnotation(
-            type = AnnotationType.INK,
-            inkType = type,
-            pageIndex = pageIndex,
-            points = currentPoints.toList(),
-            color = color,
-            strokeWidth = width
-        )
-    }
-
-    fun onDraw(point: PdfPoint) {
-        currentPoints.add(point)
-        currentAnnotation = currentAnnotation?.copy(points = currentPoints.toList())
-    }
-
-    fun onDrawCancel() {
-        currentAnnotation = null
-        currentPoints.clear()
-    }
-
-    fun onDrawEnd(): PdfAnnotation? {
-        val finalAnnot = currentAnnotation
-        currentAnnotation = null
-        currentPoints.clear()
-        return finalAnnot
-    }
-
-    fun updateDrag(point: PdfPoint) {
-        if (currentPoints.isNotEmpty()) {
-            val start = currentPoints.first()
-            currentPoints.clear()
-            currentPoints.add(start)
-            currentPoints.add(point)
-            currentAnnotation = currentAnnotation?.copy(points = currentPoints.toList())
         }
     }
 }
