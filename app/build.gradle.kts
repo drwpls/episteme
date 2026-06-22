@@ -71,6 +71,8 @@ android {
         }
         buildConfigField("boolean", "IS_PRO", "false")
         buildConfigField("boolean", "IS_OFFLINE", "false")
+        buildConfigField("String", "POCKET_TTS_MODEL_DIR", "\"sherpa-onnx-pocket-tts-int8-2026-01-26\"")
+        buildConfigField("String", "POCKET_TTS_REFERENCE_AUDIO", "\"sherpa-onnx-pocket-tts-int8-2026-01-26/test_wavs/bria.wav\"")
     }
 
     flavorDimensions += "version"
@@ -212,6 +214,11 @@ kover {
 dependencies {
 
     implementation(project(":shared"))
+
+    // Optional: place sherpa-onnx-*.aar in app/libs/ to enable PocketTTS at runtime.
+    // The PocketTTS adapter uses reflection, so builds remain possible without
+    // bundling the large AAR/model files in this repository.
+    implementation(fileTree("libs") { include("*.aar") })
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

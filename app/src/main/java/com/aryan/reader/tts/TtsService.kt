@@ -478,6 +478,7 @@ class TtsService : MediaSessionService() {
     private lateinit var player: ExoPlayer
     private lateinit var playbackManager: TtsPlaybackManager
     private lateinit var baseTtsSynthesizer: BaseTtsSynthesizer
+    private lateinit var pocketTtsSynthesizer: PocketTtsSynthesizer
     private lateinit var cacheManager: TtsCacheManager
     private var foregroundNotificationShown = false
     private var foregroundPlaybackExpected = false
@@ -962,6 +963,12 @@ class TtsService : MediaSessionService() {
             TtsAudioData(file, text, null)
         }
 
+    private val synthesizePocketTtsChunk: suspend (String) -> TtsAudioData =
+        { chunkToSpeak ->
+            val (file, text) = pocketTtsSynthesizer.synthesizeToFile(chunkToSpeak)
+            TtsAudioData(file, text, null)
+        }
+
     val audioGenerator: suspend (bookTitle: String, chapterTitle: String?, chunkIndex: Int, totalChunks: Int, text: String, speaker: String, mode: TtsMode, authToken: String?) -> TtsAudioData =
         { bookTitle, chapterTitle, chunkIndex, totalChunks, text, speaker, mode, authToken ->
             cacheManager.saveTotalChunks(bookTitle, chapterTitle, totalChunks)
@@ -992,6 +999,7 @@ class TtsService : MediaSessionService() {
                     }
                 }
                 TtsMode.BASE -> synthesizeBaseTtsChunk(text)
+                TtsMode.POCKET -> synthesizePocketTtsChunk(text)
             }
         }
 
@@ -1008,6 +1016,7 @@ class TtsService : MediaSessionService() {
         cacheManager = TtsCacheManager(this)
 
         baseTtsSynthesizer = BaseTtsSynthesizer(this)
+        pocketTtsSynthesizer = PocketTtsSynthesizer(this)
         scope.launch {
             try {
                 baseTtsSynthesizer.initialize()
@@ -1113,6 +1122,9 @@ class TtsService : MediaSessionService() {
         stopTtsForeground()
         if (::baseTtsSynthesizer.isInitialized) {
             baseTtsSynthesizer.shutdown()
+        }
+        if (::pocketTtsSynthesizer.isInitialized) {
+            pocketTtsSynthesizer.release()
         }
         if (::playbackManager.isInitialized) {
             playbackManager.release()

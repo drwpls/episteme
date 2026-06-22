@@ -1743,7 +1743,13 @@ fun TtsSettingsSheet(
     val isOss = BuildConfig.FLAVOR == "oss"
     val isOssCloudAvailable = isByokCloudTtsAvailable(context)
     var selectedTabIndex by remember(currentMode, isOssCloudAvailable) {
-        mutableIntStateOf(if (currentMode == TtsPlaybackManager.TtsMode.CLOUD && (!isOss || isOssCloudAvailable)) 0 else 1)
+        mutableIntStateOf(
+            when {
+                currentMode == TtsPlaybackManager.TtsMode.CLOUD && (!isOss || isOssCloudAvailable) -> 0
+                currentMode == TtsPlaybackManager.TtsMode.POCKET -> 2
+                else -> 1
+            }
+        )
     }
     val scope = rememberCoroutineScope()
     val samplePlayer = remember(context, scope) {
@@ -1771,17 +1777,16 @@ fun TtsSettingsSheet(
                 }
             }
 
-            if (isOss && !isOssCloudAvailable) {
-                Spacer(Modifier.height(16.dp))
-                DeviceVoicesTab(isTtsActive, context, TtsPlaybackManager.TtsMode.BASE)
-            } else {
-                Text(stringResource(R.string.tts_active_engine), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.height(8.dp))
-                Row(modifier = Modifier.fillMaxWidth().height(48.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(24.dp)).padding(4.dp)) {
-                    val modes = listOf(
-                        TtsPlaybackManager.TtsMode.CLOUD to stringResource(R.string.tts_mode_cloud_ai),
-                        TtsPlaybackManager.TtsMode.BASE to stringResource(R.string.tts_mode_device_native)
-                    )
+            Text(stringResource(R.string.tts_active_engine), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth().height(48.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(24.dp)).padding(4.dp)) {
+                    val modes = buildList {
+                        if (!isOss || isOssCloudAvailable) {
+                            add(TtsPlaybackManager.TtsMode.CLOUD to stringResource(R.string.tts_mode_cloud_ai))
+                        }
+                        add(TtsPlaybackManager.TtsMode.BASE to stringResource(R.string.tts_mode_device_native))
+                        add(TtsPlaybackManager.TtsMode.POCKET to stringResource(R.string.tts_mode_pocket_tts))
+                    }
                     modes.forEach { (mode, title) ->
                         val isSelected = currentMode == mode
                         Box(
@@ -1791,31 +1796,43 @@ fun TtsSettingsSheet(
                                     onModeChange(mode)
                                     if (mode == TtsPlaybackManager.TtsMode.CLOUD && selectedTabIndex == 1) selectedTabIndex = 0
                                     if (mode == TtsPlaybackManager.TtsMode.BASE && selectedTabIndex != 1) selectedTabIndex = 1
+                                    if (mode == TtsPlaybackManager.TtsMode.POCKET) selectedTabIndex = 2
                                 },
                             contentAlignment = Alignment.Center
                         ) {
                             Text(title, color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                         }
                     }
-                }
+            }
 
-                Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(16.dp))
 
-                TabRow(selectedTabIndex = selectedTabIndex, containerColor = Color.Transparent, divider = {}) {
-                    Tab(selected = selectedTabIndex == 0, onClick = { selectedTabIndex = 0 }, text = { Text(stringResource(R.string.tts_tab_cloud_voices), maxLines = 1, overflow = TextOverflow.Ellipsis) })
-                    Tab(selected = selectedTabIndex == 1, onClick = { selectedTabIndex = 1 }, text = { Text(stringResource(R.string.tts_tab_device_voices), maxLines = 1, overflow = TextOverflow.Ellipsis) })
-                    Tab(selected = selectedTabIndex == 2, onClick = { selectedTabIndex = 2 }, text = { Text(stringResource(R.string.tts_tab_cloud_cache), maxLines = 1, overflow = TextOverflow.Ellipsis) })
-                }
+            TabRow(selectedTabIndex = selectedTabIndex, containerColor = Color.Transparent, divider = {}) {
+                Tab(selected = selectedTabIndex == 0, onClick = { selectedTabIndex = 0 }, text = { Text(stringResource(R.string.tts_tab_cloud_voices), maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                Tab(selected = selectedTabIndex == 1, onClick = { selectedTabIndex = 1 }, text = { Text(stringResource(R.string.tts_tab_device_voices), maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                Tab(selected = selectedTabIndex == 2, onClick = { selectedTabIndex = 2 }, text = { Text(if (currentMode == TtsPlaybackManager.TtsMode.POCKET) stringResource(R.string.tts_mode_pocket_tts) else stringResource(R.string.tts_tab_cloud_cache), maxLines = 1, overflow = TextOverflow.Ellipsis) })
+            }
 
-                Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(16.dp))
 
-                when (selectedTabIndex) {
-                    0 -> AiVoicesTab(currentSpeakerId, onSpeakerChange, isTtsActive, samplePlayer, currentMode)
-                    1 -> DeviceVoicesTab(isTtsActive, context, currentMode)
-                    2 -> TtsCacheTab(bookTitle, context, currentSpeakerId)
+            when (selectedTabIndex) {
+                0 -> AiVoicesTab(currentSpeakerId, onSpeakerChange, isTtsActive, samplePlayer, currentMode)
+                1 -> DeviceVoicesTab(isTtsActive, context, currentMode)
+                2 -> if (currentMode == TtsPlaybackManager.TtsMode.POCKET) {
+                    PocketTtsInfoTab()
+                } else {
+                    TtsCacheTab(bookTitle, context, currentSpeakerId)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PocketTtsInfoTab() {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(stringResource(R.string.tts_pocket_title), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        Text(stringResource(R.string.tts_pocket_desc), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

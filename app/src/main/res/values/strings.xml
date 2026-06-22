@@ -1278,6 +1278,9 @@
     <string name="tts_active_engine">Active TTS Engine</string>
     <string name="tts_mode_cloud_ai">Cloud AI</string>
     <string name="tts_mode_device_native">Device Native</string>
+    <string name="tts_mode_pocket_tts">PocketTTS</string>
+    <string name="tts_pocket_title">PocketTTS offline neural voice</string>
+    <string name="tts_pocket_desc">Uses sherpa-onnx PocketTTS on device when the sherpa AAR and PocketTTS model assets are bundled. Falls back with an error if they are missing.</string>
     <string name="tts_tab_cloud_voices">Cloud Voices</string>
     <string name="tts_tab_device_voices">Device Voices</string>
     <string name="tts_tab_cloud_cache">Cloud Cache</string>

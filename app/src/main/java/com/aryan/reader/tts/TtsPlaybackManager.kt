@@ -276,7 +276,7 @@ class TtsPlaybackManager(
     private val chunkGenerationFailures = java.util.concurrent.ConcurrentHashMap<Int, AtomicInteger>()
 
     enum class TtsMode {
-        CLOUD, BASE
+        CLOUD, BASE, POCKET
     }
 
     data class TtsState(
