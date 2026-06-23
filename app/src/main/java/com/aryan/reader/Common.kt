@@ -1846,7 +1846,8 @@ fun TtsSettingsSheet(
                         scope = scope,
                         opStatus = pocketOpStatus,
                         onOpStatus = { pocketOpStatus = it },
-                        onModelsChanged = { /* models refresh happens in tab's LaunchedEffect */ }
+                        onModelsChanged = { /* models refresh happens in tab's LaunchedEffect */ },
+                        onModeChange = onModeChange
                     )
                 } else {
                     TtsCacheTab(bookTitle, context, currentSpeakerId)
@@ -1863,7 +1864,8 @@ fun PocketTtsSettingsTab(
     scope: CoroutineScope,
     opStatus: SherpaOpStatus?,
     onOpStatus: (SherpaOpStatus?) -> Unit,
-    onModelsChanged: () -> Unit
+    onModelsChanged: () -> Unit,
+    onModeChange: ((TtsPlaybackManager.TtsMode) -> Unit)? = null
 ) {
     var downloadedModels by remember { mutableStateOf<List<String>>(emptyList()) }
     val selectedModel = remember { mutableStateOf(synthesizer?.getCurrentModelName() ?: "") }
@@ -1874,7 +1876,9 @@ fun PocketTtsSettingsTab(
 
     fun refreshModels() {
         downloadedModels = PocketTtsSynthesizer.getDownloadedModels(context)
-        selectedModel.value = synthesizer?.getCurrentModelName() ?: ""
+        val current = synthesizer?.getCurrentModelName() ?: ""
+        selectedModel.value = current
+        if (current.isNotBlank()) onModeChange?.invoke(TtsPlaybackManager.TtsMode.POCKET)
         onModelsChanged()
     }
 
@@ -1929,6 +1933,7 @@ fun PocketTtsSettingsTab(
                         .clickable {
                             selectedModel.value = modelName
                             synthesizer?.setCurrentModelName(modelName)
+                            onModeChange?.invoke(TtsPlaybackManager.TtsMode.POCKET)
                         }
                         .padding(vertical = 4.dp)
                 ) {
@@ -1937,6 +1942,7 @@ fun PocketTtsSettingsTab(
                         onClick = {
                             selectedModel.value = modelName
                             synthesizer?.setCurrentModelName(modelName)
+                            onModeChange?.invoke(TtsPlaybackManager.TtsMode.POCKET)
                         }
                     )
                     Spacer(Modifier.width(8.dp))
