@@ -102,8 +102,10 @@ object AdrenoGpuDetector {
                 egl.eglChooseConfig(display, configAttribs, configs, 1, numConfigs)
                 
                 if (numConfigs[0] > 0) {
+                    // Use EGL14 constants for context client version
+                    val EGL_CONTEXT_CLIENT_VERSION = 0x3098
                     val attribList = intArrayOf(
-                        EGL10.EGL_CONTEXT_CLIENT_VERSION, 2,
+                        EGL_CONTEXT_CLIENT_VERSION, 2,
                         EGL10.EGL_NONE
                     )
                     

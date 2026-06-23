@@ -190,7 +190,9 @@ class AdrenoTtsModelManager(private val context: Context) {
                             var bytesRead: Int
                             var totalRead = 0L
                             
-                            while ((bytesRead = input.read(buffer)) != -1) {
+                            while (true) {
+                                bytesRead = input.read(buffer)
+                                if (bytesRead == -1) break
                                 output.write(buffer, 0, bytesRead)
                                 totalRead += bytesRead
                                 
