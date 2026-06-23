@@ -182,6 +182,12 @@ class PocketTtsSynthesizer(private val context: Context) {
         try {
             val modelDir = File(getModelsDirectory(context), modelName)
             modelDir.mkdirs()
+            Timber.tag(LOG_TAG).i(
+                "Downloading Sherpa-ONNX model name=%s url=%s targetDir=%s",
+                modelName,
+                url,
+                modelDir.absolutePath
+            )
 
             val archiveFile = File(context.cacheDir, "$modelName.tar.bz2")
             if (archiveFile.exists()) archiveFile.delete()
@@ -210,7 +216,22 @@ class PocketTtsSynthesizer(private val context: Context) {
             conn.disconnect()
 
             onProgress(1f)
+            Timber.tag(LOG_TAG).i(
+                "Downloaded Sherpa-ONNX archive name=%s archive=%s bytes=%d contentLength=%d",
+                modelName,
+                archiveFile.absolutePath,
+                archiveFile.length(),
+                contentLength
+            )
             extractTarBz2(archiveFile, modelDir)
+            val resolvedRoot = resolveModelRootDir(modelDir)
+            Timber.tag(LOG_TAG).i(
+                "Extracted Sherpa-ONNX model name=%s targetDir=%s resolvedRoot=%s modelType=%s",
+                modelName,
+                modelDir.absolutePath,
+                resolvedRoot?.absolutePath ?: "<unresolved>",
+                resolvedRoot?.let { detectModelType(modelDir).name } ?: "<unknown>"
+            )
             archiveFile.delete()
             Result.success(modelName)
         } catch (e: Exception) {
@@ -270,12 +291,25 @@ class PocketTtsSynthesizer(private val context: Context) {
         } else {
             ModelType.POCKET
         }
+        Timber.tag(LOG_TAG).i(
+            "Preparing Sherpa-ONNX TTS selectedModel=%s useFileModel=%s modelType=%s modelsDir=%s assetManager=%s",
+            selectedModel.ifBlank { "<bundled>" },
+            useFileModel,
+            modelType,
+            getModelsDirectory(context).absolutePath,
+            if (useFileModel) "null" else "context.assets"
+        )
 
         val modelConfig = OfflineTtsModelConfig()
         if (useFileModel) {
             val modelRootDir = resolveModelRootDir(File(getModelsDirectory(context), selectedModel))
                 ?: error(context.getString(R.string.tts_pocket_no_model))
             val modelDir = modelRootDir.absolutePath
+            Timber.tag(LOG_TAG).i(
+                "Using downloaded Sherpa-ONNX model root selectedModel=%s root=%s",
+                selectedModel,
+                modelDir
+            )
             when (modelType) {
                 ModelType.POCKET -> {
                     val pocketConfig = OfflineTtsPocketModelConfig()
@@ -287,6 +321,16 @@ class PocketTtsSynthesizer(private val context: Context) {
                     pocketConfig.vocabJson = "$modelDir/vocab.json"
                     pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
                     modelConfig.pocket = pocketConfig
+                    Timber.tag(LOG_TAG).i(
+                        "Sherpa-ONNX Pocket file paths lmFlow=%s lmMain=%s encoder=%s decoder=%s textConditioner=%s vocabJson=%s tokenScoresJson=%s",
+                        pocketConfig.lmFlow,
+                        pocketConfig.lmMain,
+                        pocketConfig.encoder,
+                        pocketConfig.decoder,
+                        pocketConfig.textConditioner,
+                        pocketConfig.vocabJson,
+                        pocketConfig.tokenScoresJson
+                    )
                 }
                 ModelType.KOKORO -> {
                     val kokoroConfig = OfflineTtsKokoroModelConfig()
@@ -302,6 +346,14 @@ class PocketTtsSynthesizer(private val context: Context) {
                         if (lexiconZh.exists()) append("$modelDir/lexicon-zh.txt")
                     }
                     modelConfig.kokoro = kokoroConfig
+                    Timber.tag(LOG_TAG).i(
+                        "Sherpa-ONNX Kokoro file paths model=%s voices=%s tokens=%s dataDir=%s lexicon=%s",
+                        kokoroConfig.model,
+                        kokoroConfig.voices,
+                        kokoroConfig.tokens,
+                        kokoroConfig.dataDir,
+                        kokoroConfig.lexicon
+                    )
                 }
             }
         } else {
@@ -315,6 +367,17 @@ class PocketTtsSynthesizer(private val context: Context) {
             pocketConfig.vocabJson = "$modelDir/vocab.json"
             pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
             modelConfig.pocket = pocketConfig
+            Timber.tag(LOG_TAG).i(
+                "Sherpa-ONNX bundled asset paths lmFlow=%s lmMain=%s encoder=%s decoder=%s textConditioner=%s vocabJson=%s tokenScoresJson=%s referenceAudio=%s",
+                pocketConfig.lmFlow,
+                pocketConfig.lmMain,
+                pocketConfig.encoder,
+                pocketConfig.decoder,
+                pocketConfig.textConditioner,
+                pocketConfig.vocabJson,
+                pocketConfig.tokenScoresJson,
+                BuildConfig.POCKET_TTS_REFERENCE_AUDIO.trim().trim('/')
+            )
         }
         modelConfig.numThreads = NUM_THREADS
         modelConfig.debug = BuildConfig.DEBUG
@@ -326,6 +389,11 @@ class PocketTtsSynthesizer(private val context: Context) {
         ttsConfig.silenceScale = 0.2f
 
         val assetManager = if (useFileModel) null else context.assets
+        Timber.tag(LOG_TAG).i(
+            "Creating Sherpa-ONNX OfflineTts selectedModel=%s assetManager=%s",
+            selectedModel.ifBlank { "<bundled>" },
+            if (assetManager == null) "null" else "context.assets"
+        )
         val tts = OfflineTts(assetManager, ttsConfig)
         offlineTts = tts
         loadedModelName = if (useFileModel) selectedModel else "@assets"
