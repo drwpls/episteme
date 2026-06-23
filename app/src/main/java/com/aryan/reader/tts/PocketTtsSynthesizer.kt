@@ -1,6 +1,7 @@
 package com.aryan.reader.tts
 
 import android.content.Context
+import android.net.Uri
 import android.os.ParcelFileDescriptor
 import com.aryan.reader.BuildConfig
 import com.aryan.reader.R
@@ -34,6 +35,9 @@ private const val KEY_SELECTED_MODEL = "selected_model"
 private const val MODELS_SUBDIR = "sherpa-onnx-models"
 
 enum class ModelType { POCKET, KOKORO }
+
+enum class SherpaOpPhase { DOWNLOADING, EXTRACTING, COPYING }
+data class SherpaOpStatus(val phase: SherpaOpPhase, val progress: Float)
 
 data class SherpaOnnxModel(
     val name: String,
@@ -170,13 +174,13 @@ class PocketTtsSynthesizer(private val context: Context) {
 
     suspend fun downloadModel(
         model: SherpaOnnxModel,
-        onProgress: (Float) -> Unit
-    ): Result<String> = downloadFromUrl(model.url, model.name, onProgress)
+        onStatus: (SherpaOpStatus) -> Unit
+    ): Result<String> = downloadFromUrl(model.url, model.name, onStatus)
 
     suspend fun downloadFromUrl(
         url: String,
         modelName: String,
-        onProgress: (Float) -> Unit
+        onStatus: (SherpaOpStatus) -> Unit
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
             val modelDir = File(getModelsDirectory(context), modelName)
@@ -188,8 +192,9 @@ class PocketTtsSynthesizer(private val context: Context) {
                 modelDir.absolutePath
             )
 
-            val archiveFile = File(context.cacheDir, "$modelName.tar.bz2")
-            if (archiveFile.exists()) archiveFile.delete()
+            val urlFileName = URL(url).path.substringAfterLast('/')
+            val cacheFile = File(context.cacheDir, urlFileName.ifBlank { "$modelName.archive" })
+            if (cacheFile.exists()) cacheFile.delete()
 
             val conn = URL(url).openConnection() as HttpURLConnection
             conn.connectTimeout = 30000
@@ -198,7 +203,7 @@ class PocketTtsSynthesizer(private val context: Context) {
 
             val contentLength = conn.contentLengthLong
             val inputStream = conn.inputStream
-            val outputStream = FileOutputStream(archiveFile)
+            val outputStream = FileOutputStream(cacheFile)
             val buffer = ByteArray(8192)
             var bytesRead: Int
             var totalRead = 0L
@@ -207,22 +212,33 @@ class PocketTtsSynthesizer(private val context: Context) {
                 outputStream.write(buffer, 0, bytesRead)
                 totalRead += bytesRead
                 if (contentLength > 0) {
-                    onProgress(totalRead.toFloat() / contentLength)
+                    onStatus(SherpaOpStatus(SherpaOpPhase.DOWNLOADING, totalRead.toFloat() / contentLength))
                 }
             }
             outputStream.close()
             inputStream.close()
             conn.disconnect()
 
-            onProgress(1f)
+            onStatus(SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 1f))
             Timber.tag(LOG_TAG).i(
                 "Downloaded Sherpa-ONNX archive name=%s archive=%s bytes=%d contentLength=%d",
                 modelName,
-                archiveFile.absolutePath,
-                archiveFile.length(),
+                cacheFile.absolutePath,
+                cacheFile.length(),
                 contentLength
             )
-            extractTarBz2(archiveFile, modelDir)
+
+            val isOnnx = urlFileName.endsWith(".onnx", ignoreCase = true)
+            if (isOnnx) {
+                onStatus(SherpaOpStatus(SherpaOpPhase.COPYING, 0f))
+                val target = File(modelDir, urlFileName)
+                cacheFile.renameTo(target)
+                onStatus(SherpaOpStatus(SherpaOpPhase.COPYING, 1f))
+            } else {
+                extractArchive(cacheFile, modelDir) { progress ->
+                    onStatus(SherpaOpStatus(SherpaOpPhase.EXTRACTING, progress))
+                }
+            }
             val resolvedRoot = resolveModelRootDir(modelDir)
             Timber.tag(LOG_TAG).i(
                 "Extracted Sherpa-ONNX model name=%s targetDir=%s resolvedRoot=%s modelType=%s",
@@ -231,10 +247,57 @@ class PocketTtsSynthesizer(private val context: Context) {
                 resolvedRoot?.absolutePath ?: "<unresolved>",
                 resolvedRoot?.let { detectModelType(modelDir).name } ?: "<unknown>"
             )
-            archiveFile.delete()
+            cacheFile.delete()
             Result.success(modelName)
         } catch (e: Exception) {
             Timber.tag(LOG_TAG).e(e, "Failed to download model from $url")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun importModelFile(
+        uri: Uri,
+        modelName: String,
+        onStatus: (SherpaOpStatus) -> Unit
+    ): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val modelDir = File(getModelsDirectory(context), modelName)
+            modelDir.mkdirs()
+            val fileName = uri.lastPathSegment?.lowercase() ?: "model"
+            val cacheFile = File(context.cacheDir, fileName)
+
+            val input = context.contentResolver.openInputStream(uri)
+                ?: return@withContext Result.failure(Exception("Cannot open file"))
+            cacheFile.outputStream().use { output ->
+                val buf = ByteArray(8192)
+                var n: Int
+                while (input.read(buf).also { n = it } != -1) output.write(buf, 0, n)
+            }
+            input.close()
+
+            val isOnnx = fileName.endsWith(".onnx")
+            val isArchive = fileName.endsWith(".tar.bz2") || fileName.endsWith(".tar.gz") ||
+                fileName.endsWith(".tgz") || fileName.endsWith(".zip")
+
+            if (isOnnx) {
+                onStatus(SherpaOpStatus(SherpaOpPhase.COPYING, 0f))
+                val target = File(modelDir, fileName)
+                cacheFile.renameTo(target)
+                onStatus(SherpaOpStatus(SherpaOpPhase.COPYING, 1f))
+                Timber.tag(LOG_TAG).i("Copied ONNX file name=%s to=%s", modelName, target.absolutePath)
+            } else if (isArchive) {
+                extractArchive(cacheFile, modelDir) { progress ->
+                    onStatus(SherpaOpStatus(SherpaOpPhase.EXTRACTING, progress))
+                }
+                Timber.tag(LOG_TAG).i("Extracted archive name=%s from=%s", modelName, cacheFile.absolutePath)
+            } else {
+                cacheFile.delete()
+                return@withContext Result.failure(Exception("Unsupported file type: $fileName"))
+            }
+            cacheFile.delete()
+            Result.success(modelName)
+        } catch (e: Exception) {
+            Timber.tag(LOG_TAG).e(e, "Failed to import model file uri=%s", uri)
             Result.failure(e)
         }
     }
@@ -516,7 +579,28 @@ class PocketTtsSynthesizer(private val context: Context) {
     private fun leShort(bytes: ByteArray, offset: Int): Short =
         ByteBuffer.wrap(bytes, offset, 2).order(ByteOrder.LITTLE_ENDIAN).short
 
-    private fun extractTarBz2(archiveFile: File, targetDir: File) {
+    private fun countArchiveEntries(archiveFile: File): Int {
+        val ptr = Archive.readNew()
+        var count = 0
+        try {
+            Archive.readSupportFilterAll(ptr)
+            Archive.readSupportFormatAll(ptr)
+            Archive.readOpenFileName(ptr, archiveFile.absolutePath.toByteArray(), 10240)
+            while (true) {
+                val entry = try { Archive.readNextHeader(ptr) } catch (e: ArchiveException) { if (e.code == Archive.ERRNO_EOF) break; throw e }
+                if (entry == 0L) break
+                count++
+            }
+        } finally {
+            Archive.readFree(ptr)
+        }
+        return count
+    }
+
+    private fun extractArchive(archiveFile: File, targetDir: File, onProgress: (Float) -> Unit) {
+        val totalEntries = countArchiveEntries(archiveFile)
+        var processed = 0
+
         val archivePtr = Archive.readNew()
         try {
             Archive.readSupportFilterAll(archivePtr)
@@ -543,6 +627,8 @@ class PocketTtsSynthesizer(private val context: Context) {
                         Archive.readDataIntoFd(archivePtr, pfd.fd)
                     }
                 }
+                processed++
+                if (totalEntries > 0) onProgress(processed.toFloat() / totalEntries)
             }
         } finally {
             Archive.readFree(archivePtr)

@@ -185,6 +185,8 @@ import com.aryan.reader.tts.SpeakerSamplePlayer
 import com.aryan.reader.tts.TtsCacheManager
 import com.aryan.reader.tts.TtsPlaybackManager
 import com.aryan.reader.tts.PocketTtsSynthesizer
+import com.aryan.reader.tts.SherpaOpPhase
+import com.aryan.reader.tts.SherpaOpStatus
 import com.aryan.reader.tts.formatBytes
 import com.aryan.reader.tts.loadTtsMode
 import com.aryan.reader.tts.rememberTtsController
@@ -1843,13 +1845,15 @@ fun PocketTtsSettingsTab(
 ) {
     val downloadedModels = remember { mutableStateListOf<String>() }
     val selectedModel = remember { mutableStateOf(synthesizer?.getCurrentModelName() ?: "") }
-    val isDownloading = remember { mutableStateOf(false) }
-    val downloadProgress = remember { mutableFloatStateOf(0f) }
+    var opStatus by remember { mutableStateOf<SherpaOpStatus?>(null) }
     val showModelPicker = remember { mutableStateOf(false) }
     val showCustomUrl = remember { mutableStateOf(false) }
     val customUrl = remember { mutableStateOf("") }
     val customModelName = remember { mutableStateOf("") }
+    val showImportPicker = remember { mutableStateOf(false) }
+    val importModelName = remember { mutableStateOf("") }
     val errorMessage = remember { mutableStateOf<String?>(null) }
+    val isBusy get() = opStatus != null
 
     fun refreshModels() {
         downloadedModels.clear()
@@ -1858,6 +1862,28 @@ fun PocketTtsSettingsTab(
     }
 
     LaunchedEffect(Unit) { refreshModels() }
+
+    val importFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val name = importModelName.value.trim()
+        if (uri == null || name.isBlank()) return@rememberLauncherForActivityResult
+        opStatus = SherpaOpStatus(SherpaOpPhase.COPYING, 0f)
+        showImportPicker.value = false
+        scope.launch(Dispatchers.IO) {
+            val result = synthesizer?.importModelFile(uri, name) { status ->
+                opStatus = status
+            }
+            withContext(Dispatchers.Main) {
+                result?.onSuccess {
+                    importModelName.value = ""
+                    errorMessage.value = null
+                    refreshModels()
+                }?.onFailure { e ->
+                    errorMessage.value = "Import failed: ${e.message}"
+                }
+                opStatus = null
+            }
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (errorMessage.value != null) {
@@ -1910,18 +1936,23 @@ fun PocketTtsSettingsTab(
             }
         }
 
-        if (isDownloading.value) {
-            LinearProgressIndicator(progress = { downloadProgress.value }, modifier = Modifier.fillMaxWidth().height(8.dp))
-            Text("Downloading... ${(downloadProgress.value * 100).toInt()}%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (isBusy) {
+            val status = opStatus!!
+            LinearProgressIndicator(progress = { status.progress }, modifier = Modifier.fillMaxWidth().height(8.dp))
+            val label = when (status.phase) {
+                SherpaOpPhase.DOWNLOADING -> "Downloading"
+                SherpaOpPhase.EXTRACTING -> "Extracting"
+                SherpaOpPhase.COPYING -> "Importing"
+            }
+            Text("$label... ${(status.progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             Button(
                 onClick = { showModelPicker.value = true },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !isDownloading.value
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(Icons.Default.Download, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Download model")
+                Text("Download predefined model")
             }
             Spacer(Modifier.height(4.dp))
             TextButton(
@@ -1930,7 +1961,16 @@ fun PocketTtsSettingsTab(
             ) {
                 Icon(Icons.Default.Cloud, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text(if (showCustomUrl.value) "Hide custom URL" else "Download from custom URL")
+                Text(if (showCustomUrl.value) "Hide custom URL" else "Download from URL")
+            }
+            Spacer(Modifier.height(4.dp))
+            TextButton(
+                onClick = { showImportPicker.value = !showImportPicker.value },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (showImportPicker.value) "Hide import" else "Import from device")
             }
         }
 
@@ -1938,7 +1978,7 @@ fun PocketTtsSettingsTab(
             OutlinedTextField(
                 value = customUrl.value,
                 onValueChange = { customUrl.value = it },
-                label = { Text("Archive URL (.tar.bz2)") },
+                label = { Text("Archive URL (.tar.bz2, .tar.gz, .zip, .onnx)") },
                 placeholder = { Text("https://...") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
@@ -1965,15 +2005,13 @@ fun PocketTtsSettingsTab(
                         errorMessage.value = "Invalid URL"
                         return@Button
                     }
-                    isDownloading.value = true
-                    downloadProgress.value = 0f
+                    opStatus = SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f)
                     showCustomUrl.value = false
                     scope.launch(Dispatchers.IO) {
-                        val result = synthesizer?.downloadFromUrl(url, name) { progress ->
-                            downloadProgress.value = progress
+                        val result = synthesizer?.downloadFromUrl(url, name) { status ->
+                            opStatus = status
                         }
                         withContext(Dispatchers.Main) {
-                            isDownloading.value = false
                             result?.onSuccess {
                                 customUrl.value = ""
                                 customModelName.value = ""
@@ -1982,6 +2020,7 @@ fun PocketTtsSettingsTab(
                             }?.onFailure { e ->
                                 errorMessage.value = "Download failed: ${e.message}"
                             }
+                            opStatus = null
                         }
                     }
                 },
@@ -1989,6 +2028,34 @@ fun PocketTtsSettingsTab(
                 enabled = customUrl.value.isNotBlank() && customModelName.value.isNotBlank()
             ) {
                 Text("Download from URL")
+            }
+        }
+
+        if (showImportPicker.value) {
+            OutlinedTextField(
+                value = importModelName.value,
+                onValueChange = { importModelName.value = it },
+                label = { Text("Model name") },
+                placeholder = { Text("my-tts-model") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            Spacer(Modifier.height(4.dp))
+            Button(
+                onClick = {
+                    val name = importModelName.value.trim()
+                    if (name.isBlank()) {
+                        errorMessage.value = "Please provide a model name"
+                        return@Button
+                    }
+                    importFileLauncher.launch(arrayOf("*/*"))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = importModelName.value.isNotBlank()
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Pick file (tar.gz, zip, onnx)")
             }
         }
     }
@@ -2004,22 +2071,21 @@ fun PocketTtsSettingsTab(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp)
-                                .clickable(enabled = !isDownloading.value) {
+                                .clickable(enabled = !isBusy) {
                                     showModelPicker.value = false
-                                    isDownloading.value = true
-                                    downloadProgress.value = 0f
+                                    opStatus = SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f)
                                     scope.launch(Dispatchers.IO) {
-                                        val result = synthesizer?.downloadModel(model) { progress ->
-                                            downloadProgress.value = progress
+                                        val result = synthesizer?.downloadModel(model) { status ->
+                                            opStatus = status
                                         }
                                         withContext(Dispatchers.Main) {
-                                            isDownloading.value = false
                                             result?.onSuccess {
                                                 errorMessage.value = null
                                                 refreshModels()
                                             }?.onFailure { e ->
                                                 errorMessage.value = "Download failed: ${e.message}"
                                             }
+                                            opStatus = null
                                         }
                                     }
                                 },
