@@ -188,7 +188,10 @@ import com.aryan.reader.tts.SherpaOpPhase
 import com.aryan.reader.tts.SherpaOpStatus
 import com.aryan.reader.tts.formatBytes
 import com.aryan.reader.tts.loadTtsMode
+import com.aryan.reader.tts.loadRemoteTtsSettings
 import com.aryan.reader.tts.rememberTtsController
+import com.aryan.reader.tts.RemoteTtsSettings
+import com.aryan.reader.tts.saveRemoteTtsSettings
 import com.aryan.reader.tts.splitTextIntoChunks
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1754,6 +1757,7 @@ fun TtsSettingsSheet(
             when {
                 currentMode == TtsPlaybackManager.TtsMode.CLOUD && (!isOss || isOssCloudAvailable) -> 0
                 currentMode == TtsPlaybackManager.TtsMode.POCKET -> 2
+                currentMode == TtsPlaybackManager.TtsMode.REMOTE_API -> 2
                 else -> 1
             }
         )
@@ -1796,6 +1800,7 @@ fun TtsSettingsSheet(
                         }
                         add(TtsPlaybackManager.TtsMode.BASE to stringResource(R.string.tts_mode_device_native))
                         add(TtsPlaybackManager.TtsMode.POCKET to stringResource(R.string.tts_mode_pocket_tts))
+                        add(TtsPlaybackManager.TtsMode.REMOTE_API to "Remote API")
                     }
                     modes.forEach { (mode, title) ->
                         val isSelected = currentMode == mode
@@ -1807,6 +1812,7 @@ fun TtsSettingsSheet(
                                     if (mode == TtsPlaybackManager.TtsMode.CLOUD && selectedTabIndex == 1) selectedTabIndex = 0
                                     if (mode == TtsPlaybackManager.TtsMode.BASE && selectedTabIndex != 1) selectedTabIndex = 1
                                     if (mode == TtsPlaybackManager.TtsMode.POCKET) selectedTabIndex = 2
+                                    if (mode == TtsPlaybackManager.TtsMode.REMOTE_API) selectedTabIndex = 2
                                 },
                             contentAlignment = Alignment.Center
                         ) {
@@ -1831,7 +1837,17 @@ fun TtsSettingsSheet(
             TabRow(selectedTabIndex = selectedTabIndex, containerColor = Color.Transparent, divider = {}) {
                 Tab(selected = selectedTabIndex == 0, onClick = { selectedTabIndex = 0 }, text = { Text(stringResource(R.string.tts_tab_cloud_voices), maxLines = 1, overflow = TextOverflow.Ellipsis) })
                 Tab(selected = selectedTabIndex == 1, onClick = { selectedTabIndex = 1 }, text = { Text(stringResource(R.string.tts_tab_device_voices), maxLines = 1, overflow = TextOverflow.Ellipsis) })
-                Tab(selected = selectedTabIndex == 2, onClick = { selectedTabIndex = 2 }, text = { Text(if (currentMode == TtsPlaybackManager.TtsMode.POCKET) stringResource(R.string.tts_mode_pocket_tts) else stringResource(R.string.tts_tab_cloud_cache), maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                Tab(selected = selectedTabIndex == 2, onClick = { selectedTabIndex = 2 }, text = {
+                    Text(
+                        when (currentMode) {
+                            TtsPlaybackManager.TtsMode.POCKET -> stringResource(R.string.tts_mode_pocket_tts)
+                            TtsPlaybackManager.TtsMode.REMOTE_API -> "Remote API"
+                            else -> stringResource(R.string.tts_tab_cloud_cache)
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                })
             }
 
             Spacer(Modifier.height(16.dp))
@@ -1839,18 +1855,21 @@ fun TtsSettingsSheet(
             when (selectedTabIndex) {
                 0 -> AiVoicesTab(currentSpeakerId, onSpeakerChange, isTtsActive, samplePlayer, currentMode)
                 1 -> DeviceVoicesTab(isTtsActive, context, currentMode)
-                2 -> if (currentMode == TtsPlaybackManager.TtsMode.POCKET) {
-                    PocketTtsSettingsTab(
+                2 -> when (currentMode) {
+                    TtsPlaybackManager.TtsMode.POCKET -> PocketTtsSettingsTab(
+                            context = context,
+                            synthesizer = synth,
+                            scope = scope,
+                            opStatus = pocketOpStatus,
+                            onOpStatus = { pocketOpStatus = it },
+                            onModelsChanged = { /* models refresh happens in tab's LaunchedEffect */ },
+                            onModeChange = onModeChange
+                        )
+                    TtsPlaybackManager.TtsMode.REMOTE_API -> RemoteTtsSettingsTab(
                         context = context,
-                        synthesizer = synth,
-                        scope = scope,
-                        opStatus = pocketOpStatus,
-                        onOpStatus = { pocketOpStatus = it },
-                        onModelsChanged = { /* models refresh happens in tab's LaunchedEffect */ },
                         onModeChange = onModeChange
                     )
-                } else {
-                    TtsCacheTab(bookTitle, context, currentSpeakerId)
+                    else -> TtsCacheTab(bookTitle, context, currentSpeakerId)
                 }
             }
         }
@@ -2168,6 +2187,130 @@ fun PocketTtsSettingsTab(
                 }
             }
         )
+    }
+}
+
+@Composable
+fun RemoteTtsSettingsTab(
+    context: Context,
+    onModeChange: ((TtsPlaybackManager.TtsMode) -> Unit)? = null
+) {
+    val savedSettings = remember { loadRemoteTtsSettings(context) }
+    var baseUrl by remember { mutableStateOf(savedSettings.baseUrl) }
+    var apiKey by remember { mutableStateOf(savedSettings.apiKey) }
+    var model by remember { mutableStateOf(savedSettings.model) }
+    var voice by remember { mutableStateOf(savedSettings.voice) }
+    var responseFormat by remember { mutableStateOf(savedSettings.responseFormat) }
+    var speed by remember { mutableFloatStateOf(savedSettings.speed) }
+
+    fun currentSettings(): RemoteTtsSettings {
+        return RemoteTtsSettings(
+            baseUrl = baseUrl,
+            apiKey = apiKey,
+            model = model,
+            voice = voice,
+            responseFormat = responseFormat,
+            speed = speed
+        )
+    }
+
+    LaunchedEffect(baseUrl, apiKey, model, voice, responseFormat, speed) {
+        saveRemoteTtsSettings(context, currentSettings())
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Remote OpenAI-compatible TTS", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        Text(
+            "Use your deployed PocketTTS-compatible /v1/audio/speech endpoint.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        OutlinedTextField(
+            value = baseUrl,
+            onValueChange = { baseUrl = it },
+            label = { Text("Base URL") },
+            placeholder = { Text("https://your-server.example.com") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+        Text(
+            "Use the server root or the full /v1/audio/speech URL.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        OutlinedTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it },
+            label = { Text("API key (optional)") },
+            placeholder = { Text("Bearer token if your server requires one") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = model,
+                onValueChange = { model = it },
+                label = { Text("Model") },
+                placeholder = { Text("tts-1") },
+                modifier = Modifier.weight(1f),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = voice,
+                onValueChange = { voice = it },
+                label = { Text("Voice") },
+                placeholder = { Text("alba") },
+                modifier = Modifier.weight(1f),
+                singleLine = true
+            )
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = responseFormat,
+                onValueChange = { responseFormat = it.lowercase().trim() },
+                label = { Text("Format") },
+                placeholder = { Text("wav") },
+                modifier = Modifier.weight(1f),
+                singleLine = true
+            )
+            Button(
+                onClick = {
+                    saveRemoteTtsSettings(context, currentSettings())
+                    onModeChange?.invoke(TtsPlaybackManager.TtsMode.REMOTE_API)
+                },
+                modifier = Modifier.weight(1f).heightIn(min = 56.dp),
+                enabled = baseUrl.trim().startsWith("http://") || baseUrl.trim().startsWith("https://")
+            ) {
+                Text("Use Remote")
+            }
+        }
+
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Speed", style = MaterialTheme.typography.labelMedium)
+                Text(String.format(Locale.US, "%.2fx", speed), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            }
+            Slider(
+                value = speed,
+                onValueChange = { speed = it },
+                valueRange = 0.25f..4f
+            )
+        }
+
+        if (baseUrl.isBlank()) {
+            Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Add your deployed API URL before starting TTS in Remote API mode.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+        }
     }
 }
 

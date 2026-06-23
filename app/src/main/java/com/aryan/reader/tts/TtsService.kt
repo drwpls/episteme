@@ -57,7 +57,9 @@ import org.json.JSONObject
 import timber.log.Timber
 import java.io.File
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -973,6 +975,81 @@ class TtsService : MediaSessionService() {
             }
         }
 
+    private suspend fun synthesizeRemoteApiTtsChunk(
+        text: String,
+        cacheFile: File?
+    ): TtsAudioData = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        if (text.isBlank()) return@withContext TtsAudioData(null, null, null, error = "Text is blank")
+
+        val settings = loadRemoteTtsSettings(this@TtsService)
+        val baseUrl = settings.baseUrl.trim().trimEnd('/')
+        if (baseUrl.isBlank()) {
+            return@withContext TtsAudioData(null, null, null, error = "Remote TTS API URL is not configured")
+        }
+
+        val endpoint = if (baseUrl.endsWith("/v1/audio/speech")) {
+            baseUrl
+        } else {
+            "$baseUrl/v1/audio/speech"
+        }
+        val responseFormat = settings.responseFormat.ifBlank { DEFAULT_REMOTE_TTS_RESPONSE_FORMAT }
+        val outputFile = cacheFile ?: File.createTempFile("remote_tts_", ".$responseFormat", cacheDir)
+        val tmpFile = File(outputFile.absolutePath + ".tmp")
+
+        try {
+            val payload = JSONObject().apply {
+                put("model", settings.model.ifBlank { DEFAULT_REMOTE_TTS_MODEL })
+                put("input", text)
+                put("voice", settings.voice.ifBlank { DEFAULT_REMOTE_TTS_VOICE })
+                put("response_format", responseFormat)
+                put("speed", settings.speed.coerceIn(0.25f, 4f).toDouble())
+            }
+            val request = Request.Builder()
+                .url(endpoint)
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .apply {
+                    if (settings.apiKey.isNotBlank()) {
+                        header("Authorization", "Bearer ${settings.apiKey}")
+                    }
+                    header("Accept", "audio/*, application/octet-stream")
+                }
+                .build()
+
+            okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string().orEmpty().take(300)
+                    return@withContext TtsAudioData(
+                        audioFile = null,
+                        serverText = null,
+                        wordTimings = null,
+                        error = "Remote TTS failed: HTTP ${response.code} $errorBody"
+                    )
+                }
+                val body = response.body ?: return@withContext TtsAudioData(
+                    audioFile = null,
+                    serverText = null,
+                    wordTimings = null,
+                    error = "Remote TTS returned an empty response"
+                )
+                tmpFile.outputStream().use { output ->
+                    body.byteStream().use { input -> input.copyTo(output) }
+                }
+                if (tmpFile.length() <= 0L) {
+                    tmpFile.delete()
+                    return@withContext TtsAudioData(null, null, null, error = "Remote TTS returned empty audio")
+                }
+                outputFile.parentFile?.mkdirs()
+                if (outputFile.exists()) outputFile.delete()
+                tmpFile.renameTo(outputFile)
+                TtsAudioData(outputFile, text, emptyList())
+            }
+        } catch (e: Exception) {
+            tmpFile.delete()
+            Timber.tag("TTS_REMOTE_API").e(e, "Remote OpenAI-compatible TTS failed")
+            TtsAudioData(null, null, null, error = e.message ?: "Remote TTS failed")
+        }
+    }
+
     val audioGenerator: suspend (bookTitle: String, chapterTitle: String?, chunkIndex: Int, totalChunks: Int, text: String, speaker: String, mode: TtsMode, authToken: String?) -> TtsAudioData =
         { bookTitle, chapterTitle, chunkIndex, totalChunks, text, speaker, mode, authToken ->
             cacheManager.saveTotalChunks(bookTitle, chapterTitle, totalChunks)
@@ -1004,6 +1081,16 @@ class TtsService : MediaSessionService() {
                 }
                 TtsMode.BASE -> synthesizeBaseTtsChunk(text)
                 TtsMode.POCKET -> synthesizePocketTtsChunk(text)
+                TtsMode.REMOTE_API -> {
+                    val settings = loadRemoteTtsSettings(this@TtsService)
+                    val cacheFile = cacheManager.getCacheFile(bookTitle, chapterTitle, text, settings.voice.ifBlank { DEFAULT_REMOTE_TTS_VOICE }, mode)
+                    if (cacheFile.exists() && cacheFile.length() > 44) {
+                        Timber.tag("TTS_REMOTE_API").i("Using cached remote TTS audio for chunk $chunkIndex")
+                        TtsAudioData(audioFile = cacheFile, serverText = text, wordTimings = emptyList(), error = null, streamUri = null)
+                    } else {
+                        synthesizeRemoteApiTtsChunk(text, cacheFile)
+                    }
+                }
             }
         }
 

@@ -45,6 +45,15 @@ const val TTS_CHUNK_MAX_LENGTH = 250
 const val DEFAULT_SPEAKER_ID = "Aoede"
 internal const val TTS_SETTINGS_PREFS_NAME = "epub_reader_settings"
 internal const val TTS_SPEAKER_KEY = "tts_speaker"
+private const val REMOTE_TTS_BASE_URL_KEY = "remote_tts_base_url"
+private const val REMOTE_TTS_API_KEY = "remote_tts_api_key"
+private const val REMOTE_TTS_MODEL_KEY = "remote_tts_model"
+private const val REMOTE_TTS_VOICE_KEY = "remote_tts_voice"
+private const val REMOTE_TTS_RESPONSE_FORMAT_KEY = "remote_tts_response_format"
+private const val REMOTE_TTS_SPEED_KEY = "remote_tts_speed"
+const val DEFAULT_REMOTE_TTS_MODEL = "tts-1"
+const val DEFAULT_REMOTE_TTS_VOICE = "alba"
+const val DEFAULT_REMOTE_TTS_RESPONSE_FORMAT = "wav"
 
 data class GeminiVoice(val id: String, val name: String, val description: String)
 
@@ -94,6 +103,39 @@ internal fun saveTtsSpeaker(context: Context, speakerId: String) {
 internal fun loadTtsSpeaker(context: Context): String {
     val prefs = context.getSharedPreferences(TTS_SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
     return normalizeTtsSpeakerId(prefs.getString(TTS_SPEAKER_KEY, DEFAULT_SPEAKER_ID))
+}
+
+data class RemoteTtsSettings(
+    val baseUrl: String = "",
+    val apiKey: String = "",
+    val model: String = DEFAULT_REMOTE_TTS_MODEL,
+    val voice: String = DEFAULT_REMOTE_TTS_VOICE,
+    val responseFormat: String = DEFAULT_REMOTE_TTS_RESPONSE_FORMAT,
+    val speed: Float = 1f
+)
+
+fun loadRemoteTtsSettings(context: Context): RemoteTtsSettings {
+    val prefs = context.getSharedPreferences(TTS_SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    return RemoteTtsSettings(
+        baseUrl = prefs.getString(REMOTE_TTS_BASE_URL_KEY, "") ?: "",
+        apiKey = prefs.getString(REMOTE_TTS_API_KEY, "") ?: "",
+        model = prefs.getString(REMOTE_TTS_MODEL_KEY, DEFAULT_REMOTE_TTS_MODEL) ?: DEFAULT_REMOTE_TTS_MODEL,
+        voice = prefs.getString(REMOTE_TTS_VOICE_KEY, DEFAULT_REMOTE_TTS_VOICE) ?: DEFAULT_REMOTE_TTS_VOICE,
+        responseFormat = prefs.getString(REMOTE_TTS_RESPONSE_FORMAT_KEY, DEFAULT_REMOTE_TTS_RESPONSE_FORMAT) ?: DEFAULT_REMOTE_TTS_RESPONSE_FORMAT,
+        speed = prefs.getFloat(REMOTE_TTS_SPEED_KEY, 1f).coerceIn(0.25f, 4f)
+    )
+}
+
+fun saveRemoteTtsSettings(context: Context, settings: RemoteTtsSettings) {
+    val normalizedFormat = settings.responseFormat.trim().lowercase().ifBlank { DEFAULT_REMOTE_TTS_RESPONSE_FORMAT }
+    context.getSharedPreferences(TTS_SETTINGS_PREFS_NAME, Context.MODE_PRIVATE).edit {
+        putString(REMOTE_TTS_BASE_URL_KEY, settings.baseUrl.trim().trimEnd('/'))
+        putString(REMOTE_TTS_API_KEY, settings.apiKey.trim())
+        putString(REMOTE_TTS_MODEL_KEY, settings.model.trim().ifBlank { DEFAULT_REMOTE_TTS_MODEL })
+        putString(REMOTE_TTS_VOICE_KEY, settings.voice.trim().ifBlank { DEFAULT_REMOTE_TTS_VOICE })
+        putString(REMOTE_TTS_RESPONSE_FORMAT_KEY, normalizedFormat)
+        putFloat(REMOTE_TTS_SPEED_KEY, settings.speed.coerceIn(0.25f, 4f))
+    }
 }
 
 data class TtsChapterCacheInfo(
