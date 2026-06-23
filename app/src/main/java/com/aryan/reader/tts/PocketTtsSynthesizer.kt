@@ -29,6 +29,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.zhanghai.android.libarchive.Archive
+import me.zhanghai.android.libarchive.ArchiveEntry
+import me.zhanghai.android.libarchive.ArchiveException
 import timber.log.Timber
 import java.io.File
 import java.io.FileOutputStream
@@ -372,14 +374,20 @@ class PocketTtsSynthesizer(private val context: Context) {
         try {
             Archive.readSupportFilterAll(archivePtr)
             Archive.readSupportFormatAll(archivePtr)
-            val rc = Archive.readOpenFileName(archivePtr, archiveFile.absolutePath.toByteArray(), 10240)
-            if (rc != 0) throw RuntimeException("libarchive failed to open: error code $rc")
+            Archive.readOpenFileName(archivePtr, archiveFile.absolutePath.toByteArray(), 10240)
 
             while (true) {
-                val entryPtr = Archive.readNextHeader(archivePtr) ?: break
-                val pathname = Archive.entryPathname(entryPtr) ?: continue
+                val entry = try {
+                    Archive.readNextHeader(archivePtr)
+                } catch (e: ArchiveException) {
+                    if (e.code == Archive.ERRNO_EOF) break
+                    throw e
+                }
+                if (entry == 0L) break
+
+                val pathname = ArchiveEntry.pathnameUtf8(entry) ?: continue
                 val entryFile = File(targetDir, pathname)
-                if (Archive.entryIsDir(entryPtr) != 0) {
+                if (pathname.endsWith("/")) {
                     entryFile.mkdirs()
                 } else {
                     entryFile.parentFile?.mkdirs()
