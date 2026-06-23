@@ -50,15 +50,13 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
 
-      - name: Build OssDebug
-        if: matrix.flavor.gradle == 'oss'
+      - name: Build debug
         run: |
-          ./gradlew :app:assembleOssDebug
-
-      - name: Build StandardDebug
-        if: matrix.flavor.gradle == 'standard'
-        run: |
-          ./gradlew :app:assembleStandardDebug
+          TASK=":app:assembleDebug"
+          if [ "${{ matrix.flavor.gradle }}" = "oss" ]; then
+            TASK=":app:assembleOssDebug"
+          fi
+          ./gradlew "$TASK"
 
       - uses: actions/upload-artifact@v4
         with:
