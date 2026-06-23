@@ -1,29 +1,14 @@
-/*
- * Episteme Reader - A native Android document reader.
- * Copyright (C) 2026 Episteme
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- *
- * mail: epistemereader@gmail.com
- */
 package com.aryan.reader.tts
 
 import android.content.Context
-import android.content.res.AssetManager
 import android.os.ParcelFileDescriptor
 import com.aryan.reader.BuildConfig
 import com.aryan.reader.epubreader.loadTtsSpeechRate
+import com.k2fsa.sherpa.onnx.GenerationConfig
+import com.k2fsa.sherpa.onnx.OfflineTts
+import com.k2fsa.sherpa.onnx.OfflineTtsConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsPocketModelConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -55,8 +40,8 @@ data class PocketTtsModel(
 
 class PocketTtsSynthesizer(private val context: Context) {
     private val mutex = Mutex()
-    private var offlineTts: Any? = null
-    private var loadedModelDir: String? = null
+    private var offlineTts: OfflineTts? = null
+    private var loadedModelName: String? = null
 
     companion object {
         val AVAILABLE_MODELS = listOf(
@@ -149,20 +134,13 @@ class PocketTtsSynthesizer(private val context: Context) {
             conn.disconnect()
 
             onProgress(1f)
-
             extractTarBz2(archiveFile, modelDir)
-
             archiveFile.delete()
-
             Result.success(model.name)
         } catch (e: Exception) {
             Timber.tag(POCKET_TTS_TAG).e(e, "Failed to download model ${model.name}")
             Result.failure(e)
         }
-    }
-
-    suspend fun listDownloadedModels(): List<String> = withContext(Dispatchers.IO) {
-        getDownloadedModels(context)
     }
 
     suspend fun synthesizeToFile(text: String): Pair<File?, String?> {
@@ -171,25 +149,14 @@ class PocketTtsSynthesizer(private val context: Context) {
         return withContext(Dispatchers.IO) {
             mutex.withLock {
                 try {
-                    val tts = getOrCreateTtsLocked()
-                    val generationConfigClass = Class.forName("com.k2fsa.sherpa.onnx.GenerationConfig")
-                    val generationConfig = createGenerationConfig(generationConfigClass)
-                    val generatedAudio = tts.javaClass
-                        .getMethod("generateWithConfig", String::class.java, generationConfigClass)
-                        .invoke(tts, text, generationConfig)
+                    val tts = getOrCreateOfflineTts()
+                    val config = createGenerationConfig()
+                    val audio = tts.generateWithConfig(text, config)
 
                     val outFile = File.createTempFile("pocket_tts_", ".wav", context.cacheDir)
-                    generatedAudio.javaClass
-                        .getMethod("save", String::class.java)
-                        .invoke(generatedAudio, outFile.absolutePath)
+                    audio.save(outFile.absolutePath)
 
                     Pair(outFile, text)
-                } catch (e: ClassNotFoundException) {
-                    Timber.tag(POCKET_TTS_TAG).e(e, "sherpa-onnx classes not found. Add sherpa-onnx-*.aar to app/libs/.")
-                    Pair(null, "PocketTTS is not installed. Add sherpa-onnx AAR and PocketTTS model assets.")
-                } catch (e: UnsatisfiedLinkError) {
-                    Timber.tag(POCKET_TTS_TAG).e(e, "sherpa-onnx native libraries missing")
-                    Pair(null, "PocketTTS native libraries are missing from the APK.")
                 } catch (e: Exception) {
                     Timber.tag(POCKET_TTS_TAG).e(e, "PocketTTS synthesis failed")
                     Pair(null, e.message)
@@ -199,85 +166,72 @@ class PocketTtsSynthesizer(private val context: Context) {
     }
 
     fun release() {
-        runCatching { offlineTts?.javaClass?.getMethod("release")?.invoke(offlineTts) }
+        runCatching { offlineTts?.release() }
         offlineTts = null
-        loadedModelDir = null
+        loadedModelName = null
     }
 
-    private fun getOrCreateTtsLocked(): Any {
+    private fun getOrCreateOfflineTts(): OfflineTts {
         val selectedModel = getCurrentModelName()
-        if (offlineTts != null && loadedModelDir == selectedModel) {
+        if (offlineTts != null && loadedModelName == selectedModel) {
             return offlineTts!!
         }
-        runCatching { offlineTts?.javaClass?.getMethod("release")?.invoke(offlineTts) }
+        runCatching { offlineTts?.release() }
         offlineTts = null
 
-        val pocketClass = Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsPocketModelConfig")
-        val modelClass = Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsModelConfig")
-        val configClass = Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsConfig")
-        val offlineTtsClass = Class.forName("com.k2fsa.sherpa.onnx.OfflineTts")
-
-        val pocketConfig = pocketClass.getDeclaredConstructor().newInstance()
         val useFileModel = selectedModel.isNotBlank() && isModelDownloaded(context, selectedModel)
 
-        if (useFileModel) {
+        val pocketConfig = if (useFileModel) {
             val modelDir = File(getModelsDirectory(context), selectedModel).absolutePath
-            pocketConfig.apply {
-                setField("lmFlow", "$modelDir/lm_flow.int8.onnx")
-                setField("lmMain", "$modelDir/lm_main.int8.onnx")
-                setField("encoder", "$modelDir/encoder.onnx")
-                setField("decoder", "$modelDir/decoder.int8.onnx")
-                setField("textConditioner", "$modelDir/text_conditioner.onnx")
-                setField("vocabJson", "$modelDir/vocab.json")
-                setField("tokenScoresJson", "$modelDir/token_scores.json")
-            }
+            OfflineTtsPocketModelConfig.builder()
+                .setLmFlow("$modelDir/lm_flow.int8.onnx")
+                .setLmMain("$modelDir/lm_main.int8.onnx")
+                .setEncoder("$modelDir/encoder.onnx")
+                .setDecoder("$modelDir/decoder.int8.onnx")
+                .setTextConditioner("$modelDir/text_conditioner.onnx")
+                .setVocabJson("$modelDir/vocab.json")
+                .setTokenScoresJson("$modelDir/token_scores.json")
+                .build()
         } else {
             val modelDir = BuildConfig.POCKET_TTS_MODEL_DIR.trim().trim('/')
-            pocketConfig.apply {
-                setField("lmFlow", "$modelDir/lm_flow.int8.onnx")
-                setField("lmMain", "$modelDir/lm_main.int8.onnx")
-                setField("encoder", "$modelDir/encoder.onnx")
-                setField("decoder", "$modelDir/decoder.int8.onnx")
-                setField("textConditioner", "$modelDir/text_conditioner.onnx")
-                setField("vocabJson", "$modelDir/vocab.json")
-                setField("tokenScoresJson", "$modelDir/token_scores.json")
-            }
+            OfflineTtsPocketModelConfig.builder()
+                .setLmFlow("$modelDir/lm_flow.int8.onnx")
+                .setLmMain("$modelDir/lm_main.int8.onnx")
+                .setEncoder("$modelDir/encoder.onnx")
+                .setDecoder("$modelDir/decoder.int8.onnx")
+                .setTextConditioner("$modelDir/text_conditioner.onnx")
+                .setVocabJson("$modelDir/vocab.json")
+                .setTokenScoresJson("$modelDir/token_scores.json")
+                .build()
         }
 
-        val modelConfig = modelClass.getDeclaredConstructor().newInstance().apply {
-            setField("pocket", pocketConfig)
-            setField("numThreads", POCKET_TTS_NUM_THREADS)
-            setField("debug", BuildConfig.DEBUG)
-            setField("provider", "cpu")
-        }
-        val config = configClass.getDeclaredConstructor().newInstance().apply {
-            setField("model", modelConfig)
-            setField("maxNumSentences", 1)
-            setField("silenceScale", 0.2f)
-        }
+        val modelConfig = OfflineTtsModelConfig.builder()
+            .setPocket(pocketConfig)
+            .setNumThreads(POCKET_TTS_NUM_THREADS)
+            .setDebug(BuildConfig.DEBUG)
+            .setProvider("cpu")
+            .build()
+
+        val config = OfflineTtsConfig.builder()
+            .setModel(modelConfig)
+            .setMaxNumSentences(1)
+            .setSilenceScale(0.2f)
+            .build()
 
         val tts = if (useFileModel) {
-            runCatching {
-                offlineTtsClass
-                    .getConstructor(configClass)
-                    .newInstance(config)
-            }.getOrElse {
-                offlineTtsClass
-                    .getConstructor(AssetManager::class.java, configClass)
-                    .newInstance(context.assets, config)
+            runCatching { OfflineTts(config) }.getOrElse {
+                OfflineTts(context.assets, config)
             }
         } else {
-            offlineTtsClass
-                .getConstructor(AssetManager::class.java, configClass)
-                .newInstance(context.assets, config)
+            OfflineTts(context.assets, config)
         }
 
         offlineTts = tts
-        loadedModelDir = if (useFileModel) selectedModel else "@assets"
+        loadedModelName = if (useFileModel) selectedModel else "@assets"
         return tts
     }
 
-    private fun createGenerationConfig(clazz: Class<*>): Any {
+    private fun createGenerationConfig(): GenerationConfig {
         val selectedModel = getCurrentModelName()
         val referenceWave = if (selectedModel.isNotBlank() && isModelDownloaded(context, selectedModel)) {
             val refFile = getModelFile(context, selectedModel, "test_wavs/bria.wav")
@@ -290,21 +244,17 @@ class PocketTtsSynthesizer(private val context: Context) {
             readReferenceAudioFromAssets()
         }
 
-        return clazz.getDeclaredConstructor().newInstance().apply {
-            setField("referenceAudio", referenceWave.samples)
-            setField("referenceSampleRate", referenceWave.sampleRate)
-            setField("numSteps", POCKET_TTS_NUM_STEPS)
-            setField("speed", loadTtsSpeechRate(context))
-            setField("silenceScale", 0.2f)
-            setField("extra", mapOf("temperature" to "0.7", "chunk_size" to "15"))
-        }
-    }
-
-    private fun Any.setField(name: String, value: Any?) {
-        javaClass.getDeclaredField(name).apply {
-            isAccessible = true
-            set(this@setField, value)
-        }
+        val genConfig = GenerationConfig()
+        genConfig.setReferenceAudio(referenceWave.samples)
+        genConfig.setReferenceSampleRate(referenceWave.sampleRate)
+        genConfig.setNumSteps(POCKET_TTS_NUM_STEPS)
+        genConfig.setSpeed(loadTtsSpeechRate(context))
+        genConfig.setSilenceScale(0.2f)
+        val extra = java.util.HashMap<String, String>()
+        extra["temperature"] = "0.7"
+        extra["chunk_size"] = "15"
+        genConfig.setExtra(extra)
+        return genConfig
     }
 
     private fun readReferenceAudioFromAssets(): ReferenceWave {
@@ -314,34 +264,27 @@ class PocketTtsSynthesizer(private val context: Context) {
     }
 
     private fun readReferenceWaveFile(file: File): ReferenceWave {
-        val bytes = file.readBytes()
-        return parsePcm16Wav(bytes)
+        return parsePcm16Wav(file.readBytes())
     }
 
     private fun parsePcm16Wav(bytes: ByteArray): ReferenceWave {
-        require(bytes.size > 44) { "Reference WAV is too small" }
-        require(String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF") { "Reference audio is not a RIFF WAV" }
-        require(String(bytes, 8, 4, Charsets.US_ASCII) == "WAVE") { "Reference audio is not a WAVE file" }
-
         var offset = 12
         var sampleRate = 0
         var channels = 1
-        var bitsPerSample = 16
         var dataOffset = -1
         var dataSize = 0
 
         chunkLoop@ while (offset + 8 <= bytes.size) {
             val chunkId = String(bytes, offset, 4, Charsets.US_ASCII)
-            val chunkSize = bytes.leInt(offset + 4)
+            val chunkSize = leInt(bytes, offset + 4)
             val chunkDataOffset = offset + 8
             when (chunkId) {
                 "fmt " -> {
-                    val audioFormat = bytes.leShort(chunkDataOffset).toInt()
+                    val audioFormat = leShort(bytes, chunkDataOffset).toInt()
                     require(audioFormat == 1) { "Only PCM WAV reference audio is supported" }
-                    channels = bytes.leShort(chunkDataOffset + 2).toInt().coerceAtLeast(1)
-                    sampleRate = bytes.leInt(chunkDataOffset + 4)
-                    bitsPerSample = bytes.leShort(chunkDataOffset + 14).toInt()
-                    require(bitsPerSample == 16) { "Only 16-bit PCM WAV reference audio is supported" }
+                    channels = leShort(bytes, chunkDataOffset + 2).toInt().coerceAtLeast(1)
+                    sampleRate = leInt(bytes, chunkDataOffset + 4)
+                    require(leShort(bytes, chunkDataOffset + 14).toInt() == 16) { "Only 16-bit PCM WAV reference audio is supported" }
                 }
                 "data" -> {
                     dataOffset = chunkDataOffset
@@ -366,8 +309,11 @@ class PocketTtsSynthesizer(private val context: Context) {
         return ReferenceWave(samples = samples, sampleRate = sampleRate)
     }
 
-    private fun ByteArray.leInt(offset: Int): Int = ByteBuffer.wrap(this, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int
-    private fun ByteArray.leShort(offset: Int): Short = ByteBuffer.wrap(this, offset, 2).order(ByteOrder.LITTLE_ENDIAN).short
+    private fun leInt(bytes: ByteArray, offset: Int): Int =
+        ByteBuffer.wrap(bytes, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int
+
+    private fun leShort(bytes: ByteArray, offset: Int): Short =
+        ByteBuffer.wrap(bytes, offset, 2).order(ByteOrder.LITTLE_ENDIAN).short
 
     private fun extractTarBz2(archiveFile: File, targetDir: File) {
         val archivePtr = Archive.readNew()

@@ -215,10 +215,8 @@ dependencies {
 
     implementation(project(":shared"))
 
-    // Optional: place sherpa-onnx-*.aar in app/libs/ to enable PocketTTS at runtime.
-    // The PocketTTS adapter uses reflection, so builds remain possible without
-    // bundling the large AAR/model files in this repository.
-    implementation(fileTree("libs") { include("*.aar") })
+    // sherpa-onnx for PocketTTS on-device neural TTS.
+    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.3")
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
