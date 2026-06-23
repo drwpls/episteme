@@ -1846,6 +1846,9 @@ fun PocketTtsSettingsTab(
     val isDownloading = remember { mutableStateOf(false) }
     val downloadProgress = remember { mutableFloatStateOf(0f) }
     val showModelPicker = remember { mutableStateOf(false) }
+    val showCustomUrl = remember { mutableStateOf(false) }
+    val customUrl = remember { mutableStateOf("") }
+    val customModelName = remember { mutableStateOf("") }
     val errorMessage = remember { mutableStateOf<String?>(null) }
 
     fun refreshModels() {
@@ -1919,6 +1922,73 @@ fun PocketTtsSettingsTab(
                 Icon(Icons.Default.Download, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("Download model")
+            }
+            Spacer(Modifier.height(4.dp))
+            TextButton(
+                onClick = { showCustomUrl.value = !showCustomUrl.value },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Link, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (showCustomUrl.value) "Hide custom URL" else "Download from custom URL")
+            }
+        }
+
+        if (showCustomUrl.value) {
+            OutlinedTextField(
+                value = customUrl.value,
+                onValueChange = { customUrl.value = it },
+                label = { Text("Archive URL (.tar.bz2)") },
+                placeholder = { Text("https://...") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                value = customModelName.value,
+                onValueChange = { customModelName.value = it },
+                label = { Text("Model name") },
+                placeholder = { Text("my-tts-model") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            Spacer(Modifier.height(4.dp))
+            Button(
+                onClick = {
+                    val url = customUrl.value.trim()
+                    val name = customModelName.value.trim()
+                    if (url.isBlank() || name.isBlank()) {
+                        errorMessage.value = "Please provide both URL and model name"
+                        return@Button
+                    }
+                    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                        errorMessage.value = "Invalid URL"
+                        return@Button
+                    }
+                    isDownloading.value = true
+                    downloadProgress.value = 0f
+                    showCustomUrl.value = false
+                    scope.launch(Dispatchers.IO) {
+                        val result = synthesizer?.downloadFromUrl(url, name) { progress ->
+                            downloadProgress.value = progress
+                        }
+                        withContext(Dispatchers.Main) {
+                            isDownloading.value = false
+                            result?.onSuccess {
+                                customUrl.value = ""
+                                customModelName.value = ""
+                                errorMessage.value = null
+                                refreshModels()
+                            }?.onFailure { e ->
+                                errorMessage.value = "Download failed: ${e.message}"
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = customUrl.value.isNotBlank() && customModelName.value.isNotBlank()
+            ) {
+                Text("Download from URL")
             }
         }
     }

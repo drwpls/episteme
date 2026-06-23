@@ -7,6 +7,7 @@ import com.aryan.reader.epubreader.loadTtsSpeechRate
 import com.k2fsa.sherpa.onnx.GenerationConfig
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsPocketModelConfig
 import kotlinx.coroutines.Dispatchers
@@ -24,18 +25,22 @@ import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-private const val POCKET_TTS_TAG = "POCKET_TTS_DIAG"
-private const val POCKET_TTS_NUM_THREADS = 2
-private const val POCKET_TTS_NUM_STEPS = 2
-private const val PREFS_NAME = "pocket_tts_prefs"
+private const val LOG_TAG = "SHERPA_ONNX"
+private const val NUM_THREADS = 2
+private const val NUM_STEPS = 2
+private const val PREFS_NAME = "sherpa_onnx_prefs"
 private const val KEY_SELECTED_MODEL = "selected_model"
-private const val MODELS_SUBDIR = "pocket-tts-models"
+private const val MODELS_SUBDIR = "sherpa-onnx-models"
 
-data class PocketTtsModel(
+enum class ModelType { POCKET, KOKORO }
+
+data class SherpaOnnxModel(
     val name: String,
     val displayName: String,
     val url: String,
-    val description: String
+    val description: String,
+    val modelType: ModelType,
+    val huggingfaceUrl: String? = null
 )
 
 class PocketTtsSynthesizer(private val context: Context) {
@@ -45,17 +50,37 @@ class PocketTtsSynthesizer(private val context: Context) {
 
     companion object {
         val AVAILABLE_MODELS = listOf(
-            PocketTtsModel(
+            SherpaOnnxModel(
                 name = "sherpa-onnx-pocket-tts-int8-2026-01-26",
                 displayName = "PocketTTS int8 (English)",
                 url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2",
-                description = "~65 MB, int8 quantized, English"
+                description = "~65 MB, int8 quantized, English",
+                modelType = ModelType.POCKET,
+                huggingfaceUrl = "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26"
             ),
-            PocketTtsModel(
+            SherpaOnnxModel(
                 name = "sherpa-onnx-pocket-tts-2026-01-26",
                 displayName = "PocketTTS float32 (English, higher quality)",
                 url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-2026-01-26.tar.bz2",
-                description = "~250 MB, float32, English"
+                description = "~250 MB, float32, English",
+                modelType = ModelType.POCKET,
+                huggingfaceUrl = "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-2026-01-26"
+            ),
+            SherpaOnnxModel(
+                name = "kokoro-multi-lang-v1_0",
+                displayName = "Kokoro v1.0 (Chinese + English, 53 speakers)",
+                url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
+                description = "~300 MB, 53 speakers, Chinese + English",
+                modelType = ModelType.KOKORO,
+                huggingfaceUrl = null
+            ),
+            SherpaOnnxModel(
+                name = "kokoro-en-v0_19",
+                displayName = "Kokoro v0.19 (English, 11 speakers)",
+                url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
+                description = "~100 MB, 11 speakers, English",
+                modelType = ModelType.KOKORO,
+                huggingfaceUrl = "https://huggingface.co/RuiSumida/sherpa-onnx-kokoro-int8-en-v0_19"
             )
         )
 
@@ -87,6 +112,22 @@ class PocketTtsSynthesizer(private val context: Context) {
             val modelDir = File(getModelsDirectory(context), modelName)
             return modelDir.isDirectory() && modelDir.list()?.isNotEmpty() == true
         }
+
+        fun detectModelType(modelDir: File): ModelType {
+            val files = modelDir.list() ?: return ModelType.POCKET
+            return if (files.any { it == "lm_flow.int8.onnx" }) {
+                ModelType.POCKET
+            } else if (files.any { it == "model.onnx" } && files.any { it == "voices.bin" }) {
+                ModelType.KOKORO
+            } else {
+                ModelType.POCKET
+            }
+        }
+
+        fun detectModelTypeByName(modelName: String): ModelType {
+            val lower = modelName.lowercase()
+            return if (lower.startsWith("kokoro")) ModelType.KOKORO else ModelType.POCKET
+        }
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -99,18 +140,23 @@ class PocketTtsSynthesizer(private val context: Context) {
     }
 
     suspend fun downloadModel(
-        model: PocketTtsModel,
+        model: SherpaOnnxModel,
+        onProgress: (Float) -> Unit
+    ): Result<String> = downloadFromUrl(model.url, model.name, onProgress)
+
+    suspend fun downloadFromUrl(
+        url: String,
+        modelName: String,
         onProgress: (Float) -> Unit
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val modelDir = File(getModelsDirectory(context), model.name)
+            val modelDir = File(getModelsDirectory(context), modelName)
             modelDir.mkdirs()
 
-            val archiveFile = File(context.cacheDir, "${model.name}.tar.bz2")
+            val archiveFile = File(context.cacheDir, "$modelName.tar.bz2")
             if (archiveFile.exists()) archiveFile.delete()
 
-            val url = URL(model.url)
-            val conn = url.openConnection() as HttpURLConnection
+            val conn = URL(url).openConnection() as HttpURLConnection
             conn.connectTimeout = 30000
             conn.readTimeout = 30000
             conn.connect()
@@ -136,9 +182,9 @@ class PocketTtsSynthesizer(private val context: Context) {
             onProgress(1f)
             extractTarBz2(archiveFile, modelDir)
             archiveFile.delete()
-            Result.success(model.name)
+            Result.success(modelName)
         } catch (e: Exception) {
-            Timber.tag(POCKET_TTS_TAG).e(e, "Failed to download model ${model.name}")
+            Timber.tag(LOG_TAG).e(e, "Failed to download model from $url")
             Result.failure(e)
         }
     }
@@ -153,12 +199,12 @@ class PocketTtsSynthesizer(private val context: Context) {
                     val config = createGenerationConfig()
                     val audio = tts.generateWithConfig(text, config)
 
-                    val outFile = File.createTempFile("pocket_tts_", ".wav", context.cacheDir)
+                    val outFile = File.createTempFile("sherpa_tts_", ".wav", context.cacheDir)
                     audio.save(outFile.absolutePath)
 
                     Pair(outFile, text)
                 } catch (e: Exception) {
-                    Timber.tag(POCKET_TTS_TAG).e(e, "PocketTTS synthesis failed")
+                    Timber.tag(LOG_TAG).e(e, "Sherpa-ONNX synthesis failed")
                     Pair(null, e.message)
                 }
             }
@@ -180,31 +226,56 @@ class PocketTtsSynthesizer(private val context: Context) {
         offlineTts = null
 
         val useFileModel = selectedModel.isNotBlank() && isModelDownloaded(context, selectedModel)
-
-        val pocketConfig = OfflineTtsPocketModelConfig()
-        if (useFileModel) {
-            val modelDir = File(getModelsDirectory(context), selectedModel).absolutePath
-            pocketConfig.lmFlow = "$modelDir/lm_flow.int8.onnx"
-            pocketConfig.lmMain = "$modelDir/lm_main.int8.onnx"
-            pocketConfig.encoder = "$modelDir/encoder.onnx"
-            pocketConfig.decoder = "$modelDir/decoder.int8.onnx"
-            pocketConfig.textConditioner = "$modelDir/text_conditioner.onnx"
-            pocketConfig.vocabJson = "$modelDir/vocab.json"
-            pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
+        val modelType = if (useFileModel) {
+            detectModelType(File(getModelsDirectory(context), selectedModel))
         } else {
-            val modelDir = BuildConfig.POCKET_TTS_MODEL_DIR.trim().trim('/')
-            pocketConfig.lmFlow = "$modelDir/lm_flow.int8.onnx"
-            pocketConfig.lmMain = "$modelDir/lm_main.int8.onnx"
-            pocketConfig.encoder = "$modelDir/encoder.onnx"
-            pocketConfig.decoder = "$modelDir/decoder.int8.onnx"
-            pocketConfig.textConditioner = "$modelDir/text_conditioner.onnx"
-            pocketConfig.vocabJson = "$modelDir/vocab.json"
-            pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
+            ModelType.POCKET
         }
 
         val modelConfig = OfflineTtsModelConfig()
-        modelConfig.pocket = pocketConfig
-        modelConfig.numThreads = POCKET_TTS_NUM_THREADS
+        if (useFileModel) {
+            val modelDir = File(getModelsDirectory(context), selectedModel).absolutePath
+            when (modelType) {
+                ModelType.POCKET -> {
+                    val pocketConfig = OfflineTtsPocketModelConfig()
+                    pocketConfig.lmFlow = "$modelDir/lm_flow.int8.onnx"
+                    pocketConfig.lmMain = "$modelDir/lm_main.int8.onnx"
+                    pocketConfig.encoder = "$modelDir/encoder.onnx"
+                    pocketConfig.decoder = "$modelDir/decoder.int8.onnx"
+                    pocketConfig.textConditioner = "$modelDir/text_conditioner.onnx"
+                    pocketConfig.vocabJson = "$modelDir/vocab.json"
+                    pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
+                    modelConfig.pocket = pocketConfig
+                }
+                ModelType.KOKORO -> {
+                    val kokoroConfig = OfflineTtsKokoroModelConfig()
+                    kokoroConfig.model = "$modelDir/model.onnx"
+                    kokoroConfig.voices = "$modelDir/voices.bin"
+                    kokoroConfig.tokens = "$modelDir/tokens.txt"
+                    kokoroConfig.dataDir = "$modelDir/espeak-ng-data"
+                    val lexiconEn = File("$modelDir/lexicon-us-en.txt")
+                    val lexiconZh = File("$modelDir/lexicon-zh.txt")
+                    kokoroConfig.lexicon = buildString {
+                        if (lexiconEn.exists()) append("$modelDir/lexicon-us-en.txt")
+                        if (lexiconEn.exists() && lexiconZh.exists()) append(",")
+                        if (lexiconZh.exists()) append("$modelDir/lexicon-zh.txt")
+                    }
+                    modelConfig.kokoro = kokoroConfig
+                }
+            }
+        } else {
+            val modelDir = BuildConfig.POCKET_TTS_MODEL_DIR.trim().trim('/')
+            val pocketConfig = OfflineTtsPocketModelConfig()
+            pocketConfig.lmFlow = "$modelDir/lm_flow.int8.onnx"
+            pocketConfig.lmMain = "$modelDir/lm_main.int8.onnx"
+            pocketConfig.encoder = "$modelDir/encoder.onnx"
+            pocketConfig.decoder = "$modelDir/decoder.int8.onnx"
+            pocketConfig.textConditioner = "$modelDir/text_conditioner.onnx"
+            pocketConfig.vocabJson = "$modelDir/vocab.json"
+            pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
+            modelConfig.pocket = pocketConfig
+        }
+        modelConfig.numThreads = NUM_THREADS
         modelConfig.debug = BuildConfig.DEBUG
         modelConfig.provider = "cpu"
 
@@ -221,24 +292,34 @@ class PocketTtsSynthesizer(private val context: Context) {
 
     private fun createGenerationConfig(): GenerationConfig {
         val selectedModel = getCurrentModelName()
-        val referenceWave = if (selectedModel.isNotBlank() && isModelDownloaded(context, selectedModel)) {
-            val refFile = getModelFile(context, selectedModel, "test_wavs/bria.wav")
-            if (refFile.exists()) {
-                readReferenceWaveFile(refFile)
-            } else {
-                readReferenceAudioFromAssets()
-            }
+        val isFileModel = selectedModel.isNotBlank() && isModelDownloaded(context, selectedModel)
+        val modelType = if (isFileModel) {
+            detectModelType(File(getModelsDirectory(context), selectedModel))
         } else {
-            readReferenceAudioFromAssets()
+            ModelType.POCKET
         }
 
         val genConfig = GenerationConfig()
-        genConfig.referenceAudio = referenceWave.samples
-        genConfig.referenceSampleRate = referenceWave.sampleRate
-        genConfig.numSteps = POCKET_TTS_NUM_STEPS
+        when (modelType) {
+            ModelType.POCKET -> {
+                val referenceWave = if (isFileModel) {
+                    val refFile = getModelFile(context, selectedModel, "test_wavs/bria.wav")
+                    if (refFile.exists()) readReferenceWaveFile(refFile)
+                    else readReferenceAudioFromAssets()
+                } else {
+                    readReferenceAudioFromAssets()
+                }
+                genConfig.referenceAudio = referenceWave.samples
+                genConfig.referenceSampleRate = referenceWave.sampleRate
+                genConfig.numSteps = NUM_STEPS
+                genConfig.extra = mapOf("temperature" to "0.7", "chunk_size" to "15")
+            }
+            ModelType.KOKORO -> {
+                genConfig.sid = 0
+            }
+        }
         genConfig.speed = loadTtsSpeechRate(context)
         genConfig.silenceScale = 0.2f
-        genConfig.extra = mapOf("temperature" to "0.7", "chunk_size" to "15")
         return genConfig
     }
 

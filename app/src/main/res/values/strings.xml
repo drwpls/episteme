@@ -1278,10 +1278,10 @@
     <string name="tts_active_engine">Active TTS Engine</string>
     <string name="tts_mode_cloud_ai">Cloud AI</string>
     <string name="tts_mode_device_native">Device Native</string>
-    <string name="tts_mode_pocket_tts">PocketTTS</string>
-    <string name="tts_pocket_title">PocketTTS offline neural voice</string>
-    <string name="tts_pocket_desc">Download a sherpa-onnx PocketTTS model to use on-device neural TTS. Select a downloaded model below, or download one from the available options.</string>
-    <string name="tts_pocket_no_model">No model selected. Download a model to use PocketTTS.</string>
+    <string name="tts_mode_pocket_tts">Sherpa-ONNX</string>
+    <string name="tts_pocket_title">Sherpa-ONNX offline neural voice</string>
+    <string name="tts_pocket_desc">Download a sherpa-onnx model (PocketTTS, Kokoro) to use on-device neural TTS. Select a downloaded model below, or download from the available options or a custom URL.</string>
+    <string name="tts_pocket_no_model">No model selected. Download a model to use Sherpa-ONNX.</string>
     <string name="tts_tab_cloud_voices">Cloud Voices</string>
     <string name="tts_tab_device_voices">Device Voices</string>
     <string name="tts_tab_cloud_cache">Cloud Cache</string>
