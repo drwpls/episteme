@@ -110,9 +110,23 @@ android {
                 keyPassword = localProperties.getProperty("MYAPP_RELEASE_KEY_PASSWORD")
             }
         }
+        create("ci-debug") {
+            val ciKeystore = file("ci-debug.keystore")
+            if (ciKeystore.isFile) {
+                storeFile = ciKeystore
+                storePassword = "android"
+                keyAlias = "ci-debug"
+                keyPassword = "android"
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            if (System.getenv("CI") == "true") {
+                signingConfig = signingConfigs.findByName("ci-debug")
+            }
+        }
         release {
             val storePath = localProperties.getProperty("MYAPP_RELEASE_STORE_FILE")
             if (!storePath.isNullOrEmpty()) {
