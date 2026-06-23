@@ -121,7 +121,7 @@ class PocketTtsSynthesizer(private val context: Context) {
         fun detectModelType(modelDir: File): ModelType {
             val modelRoot = resolveModelRootDir(modelDir) ?: modelDir
             val files = modelRoot.list() ?: return ModelType.POCKET
-            return if (files.any { it == "lm_flow.int8.onnx" }) {
+            return if (files.any { it.startsWith("lm_flow") && it.endsWith(".onnx") }) {
                 ModelType.POCKET
             } else if (files.any { it == "model.onnx" } && files.any { it == "voices.bin" }) {
                 ModelType.KOKORO
@@ -143,15 +143,14 @@ class PocketTtsSynthesizer(private val context: Context) {
         }
 
         private fun hasPocketModelFiles(dir: File): Boolean {
-            return listOf(
-                "lm_flow.int8.onnx",
-                "lm_main.int8.onnx",
-                "encoder.onnx",
-                "decoder.int8.onnx",
-                "text_conditioner.onnx",
-                "vocab.json",
-                "token_scores.json"
-            ).all { File(dir, it).isFile }
+            val onnxOk = { base: String ->
+                File(dir, "$base.int8.onnx").isFile || File(dir, "$base.onnx").isFile
+            }
+            return onnxOk("lm_flow") && onnxOk("lm_main") &&
+                onnxOk("decoder") && onnxOk("encoder") &&
+                onnxOk("text_conditioner") &&
+                File(dir, "vocab.json").isFile &&
+                File(dir, "token_scores.json").isFile
         }
 
         private fun hasKokoroModelFiles(dir: File): Boolean {
@@ -312,12 +311,15 @@ class PocketTtsSynthesizer(private val context: Context) {
             )
             when (modelType) {
                 ModelType.POCKET -> {
+                    fun onnxPath(base: String) =
+                        if (File(modelDir, "$base.int8.onnx").isFile) "$modelDir/$base.int8.onnx"
+                        else "$modelDir/$base.onnx"
                     val pocketConfig = OfflineTtsPocketModelConfig()
-                    pocketConfig.lmFlow = "$modelDir/lm_flow.int8.onnx"
-                    pocketConfig.lmMain = "$modelDir/lm_main.int8.onnx"
-                    pocketConfig.encoder = "$modelDir/encoder.onnx"
-                    pocketConfig.decoder = "$modelDir/decoder.int8.onnx"
-                    pocketConfig.textConditioner = "$modelDir/text_conditioner.onnx"
+                    pocketConfig.lmFlow = onnxPath("lm_flow")
+                    pocketConfig.lmMain = onnxPath("lm_main")
+                    pocketConfig.encoder = onnxPath("encoder")
+                    pocketConfig.decoder = onnxPath("decoder")
+                    pocketConfig.textConditioner = onnxPath("text_conditioner")
                     pocketConfig.vocabJson = "$modelDir/vocab.json"
                     pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
                     modelConfig.pocket = pocketConfig
