@@ -184,6 +184,8 @@ import com.aryan.reader.tts.GEMINI_TTS_SPEAKERS
 import com.aryan.reader.tts.SpeakerSamplePlayer
 import com.aryan.reader.tts.TtsCacheManager
 import com.aryan.reader.tts.TtsPlaybackManager
+import com.aryan.reader.tts.gpu.AdrenoGpuDetector
+import com.aryan.reader.tts.gpu.AdrenoTtsModelManager
 import com.aryan.reader.tts.PocketTtsSynthesizer
 import com.aryan.reader.tts.SherpaOpPhase
 import com.aryan.reader.tts.SherpaOpStatus
@@ -1802,6 +1804,10 @@ fun TtsSettingsSheet(
                         add(TtsPlaybackManager.TtsMode.BASE to stringResource(R.string.tts_mode_device_native))
                         add(TtsPlaybackManager.TtsMode.POCKET to stringResource(R.string.tts_mode_pocket_tts))
                         add(TtsPlaybackManager.TtsMode.REMOTE_API to "Remote API")
+                        // Add Adreno GPU mode only if Adreno GPU is available
+                        if (AdrenoGpuDetector.isAdrenoGpuAvailable(context)) {
+                            add(TtsPlaybackManager.TtsMode.ADRENO_GPU to "GPU (Adreno)")
+                        }
                     }
                     modes.forEach { (mode, title) ->
                         val isSelected = currentMode == mode
@@ -1814,6 +1820,7 @@ fun TtsSettingsSheet(
                                     if (mode == TtsPlaybackManager.TtsMode.BASE && selectedTabIndex != 1) selectedTabIndex = 1
                                     if (mode == TtsPlaybackManager.TtsMode.POCKET) selectedTabIndex = 2
                                     if (mode == TtsPlaybackManager.TtsMode.REMOTE_API) selectedTabIndex = 2
+                                    if (mode == TtsPlaybackManager.TtsMode.ADRENO_GPU) selectedTabIndex = 2
                                 },
                             contentAlignment = Alignment.Center
                         ) {
@@ -1843,6 +1850,7 @@ fun TtsSettingsSheet(
                         when (currentMode) {
                             TtsPlaybackManager.TtsMode.POCKET -> stringResource(R.string.tts_mode_pocket_tts)
                             TtsPlaybackManager.TtsMode.REMOTE_API -> "Remote API"
+                            TtsPlaybackManager.TtsMode.ADRENO_GPU -> "GPU"
                             else -> stringResource(R.string.tts_tab_cloud_cache)
                         },
                         maxLines = 1,
@@ -1867,6 +1875,10 @@ fun TtsSettingsSheet(
                             onModeChange = onModeChange
                         )
                     TtsPlaybackManager.TtsMode.REMOTE_API -> RemoteTtsSettingsTab(
+                        context = context,
+                        onModeChange = onModeChange
+                    )
+                    TtsPlaybackManager.TtsMode.ADRENO_GPU -> AdrenoGpuSettingsTab(
                         context = context,
                         onModeChange = onModeChange
                     )
@@ -2311,6 +2323,186 @@ fun RemoteTtsSettingsTab(
                     modifier = Modifier.padding(12.dp)
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun AdrenoGpuSettingsTab(
+    context: Context,
+    onModeChange: ((TtsPlaybackManager.TtsMode) -> Unit)? = null
+) {
+    val scope = rememberCoroutineScope()
+    val modelManager = remember { AdrenoTtsModelManager(context) }
+    
+    var modelStatus by remember { mutableStateOf(modelManager.getModelStatus()) }
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableStateOf(0) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var gpuInfo by remember { mutableStateOf(AdrenoGpuDetector.getGpuCapabilitiesDescription(context)) }
+    
+    fun refreshStatus() {
+        modelStatus = modelManager.getModelStatus()
+    }
+    
+    LaunchedEffect(Unit) { refreshStatus() }
+    
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Adreno GPU TTS (Experimental)", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        Text(
+            "GPU-accelerated TTS using Qualcomm Adreno GPUs. Requires ~200MB model download.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        
+        // GPU Info Card
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("GPU Information", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text(gpuInfo, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        
+        // Model Status
+        Surface(
+            color = if (modelStatus.isComplete) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Model Status", style = MaterialTheme.typography.labelMedium)
+                
+                if (modelStatus.isComplete) {
+                    Text(
+                        "✓ Models downloaded (${formatBytes(modelStatus.downloadedSizeBytes)})",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Button(
+                        onClick = { onModeChange?.invoke(TtsPlaybackManager.TtsMode.ADRENO_GPU) },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    ) {
+                        Text("Use Adreno GPU TTS")
+                    }
+                } else {
+                    Text(
+                        "Models required: ${formatBytes(modelStatus.requiredSizeBytes)}",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        "Downloaded: ${formatBytes(modelStatus.downloadedSizeBytes)} (${modelStatus.progressPercent}%)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    
+                    if (isDownloading) {
+                        LinearProgressIndicator(
+                            progress = { downloadProgress / 100f },
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                        )
+                        Text("Downloading... $downloadProgress%", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    isDownloading = true
+                                    errorMessage = null
+                                    modelManager.downloadModels { progress ->
+                                        downloadProgress = progress.progressPercent
+                                    }.let { result ->
+                                        isDownloading = false
+                                        if (result.isFailure) {
+                                            errorMessage = result.exceptionOrNull()?.message
+                                        }
+                                        refreshStatus()
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            enabled = !isDownloading
+                        ) {
+                            Text("Download Models")
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Error message
+        errorMessage?.let { error ->
+            Surface(
+                color = MaterialTheme.colorScheme.errorContainer,
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { errorMessage = null }) {
+                        Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = MaterialTheme.colorScheme.onErrorContainer)
+                    }
+                }
+            }
+        }
+        
+        // Available voices
+        if (modelStatus.isComplete) {
+            val availableVoices = modelManager.getAvailableVoicePacks()
+            if (availableVoices.isNotEmpty()) {
+                Text("Available Voices", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                availableVoices.forEach { voice ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(voice, style = MaterialTheme.typography.bodyMedium)
+                        if (voice == modelStatus.currentVoicePack) {
+                            Text("Active", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Delete models button
+        if (modelStatus.downloadedSizeBytes > 0) {
+            TextButton(
+                onClick = {
+                    scope.launch {
+                        modelManager.deleteAllModels()
+                        refreshStatus()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Delete Models", color = MaterialTheme.colorScheme.error)
+            }
+        }
+        
+        // Info note
+        Surface(
+            color = MaterialTheme.colorScheme.tertiaryContainer,
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                "Adreno GPU TTS uses hand-optimized OpenCL kernels for 2x faster synthesis on supported devices. Based on a8nova's Kokoro-82M implementation.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.padding(12.dp)
+            )
         }
     }
 }

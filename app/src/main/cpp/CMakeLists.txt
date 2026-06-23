@@ -80,6 +80,33 @@ set_target_properties(mobi PROPERTIES C_VISIBILITY_PRESET default)
 
 
 # ===================================================================
+# ADRENO TTS GPU ACCELERATION
+# ===================================================================
+# Build the Adreno TTS library for GPU-accelerated TTS on Qualcomm devices
+find_library(opencl-lib OpenCL)
+
+add_library(
+        adreno_tts
+        SHARED
+        adreno_tts/adreno_tts_jni.cpp
+)
+
+# Set C++ standard and OpenCL include path
+target_compile_options(adreno_tts PRIVATE -std=c++17)
+target_include_directories(adreno_tts PRIVATE
+        ${CMAKE_ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
+)
+
+# Link Adreno TTS library
+target_link_libraries(
+        adreno_tts
+        PRIVATE
+        ${log-lib}
+        ${opencl-lib}
+        dl
+)
+
+# ===================================================================
 # FINAL NATIVE LIBRARY FOR THE APP
 # ===================================================================
 # 6. Define our final JNI wrapper library.

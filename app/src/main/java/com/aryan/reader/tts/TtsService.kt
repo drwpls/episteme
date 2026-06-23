@@ -47,6 +47,9 @@ import com.aryan.reader.GEMINI_CLOUD_TTS_MODEL
 import com.aryan.reader.isByokCloudTtsAvailable
 import com.aryan.reader.loadAiByokSettings
 import com.aryan.reader.tts.TtsPlaybackManager.TtsMode
+import com.aryan.reader.tts.gpu.AdrenoTtsEngine
+import com.aryan.reader.tts.gpu.AdrenoTtsModelManager
+import com.aryan.reader.tts.gpu.AdrenoGpuDetector
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -975,6 +978,83 @@ class TtsService : MediaSessionService() {
             }
         }
 
+    private lateinit var adrenoTtsEngine: AdrenoTtsEngine
+    private lateinit var adrenoModelManager: AdrenoTtsModelManager
+
+    private suspend fun synthesizeAdrenoGpuTtsChunk(
+        text: String,
+        cacheFile: File?
+    ): TtsAudioData = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        if (text.isBlank()) {
+            return@withContext TtsAudioData(null, null, null, error = "Text is blank")
+        }
+
+        try {
+            // Check if Adreno GPU is available
+            if (!AdrenoGpuDetector.isAdrenoGpuAvailable(this@TtsService)) {
+                return@withContext TtsAudioData(
+                    null, null, null, 
+                    error = "Adreno GPU not available on this device"
+                )
+            }
+
+            // Initialize engine and model manager if needed
+            if (!::adrenoTtsEngine.isInitialized) {
+                adrenoTtsEngine = AdrenoTtsEngine(this@TtsService)
+                adrenoModelManager = AdrenoTtsModelManager(this@TtsService)
+            }
+
+            // Check if models are downloaded
+            val modelStatus = adrenoModelManager.getModelStatus()
+            if (!modelStatus.isComplete) {
+                return@withContext TtsAudioData(
+                    null, null, null,
+                    error = "Adreno TTS models not downloaded. Required: ${modelStatus.requiredSizeBytes / 1024 / 1024} MB"
+                )
+            }
+
+            // Initialize engine
+            val initResult = adrenoTtsEngine.initialize(adrenoModelManager)
+            if (initResult.isFailure) {
+                return@withContext TtsAudioData(
+                    null, null, null,
+                    error = "Failed to initialize Adreno TTS: ${initResult.exceptionOrNull()?.message}"
+                )
+            }
+
+            // Check cache
+            val outputFile = cacheFile ?: File.createTempFile("adreno_tts_", ".wav", cacheDir)
+            if (outputFile.exists() && outputFile.length() > 44) {
+                Timber.tag("TTS_ADRENO").i("Using cached audio")
+                return@withContext TtsAudioData(outputFile, text, emptyList())
+            }
+
+            // Synthesize
+            val result = adrenoTtsEngine.synthesize(text)
+            if (result.audioData == null) {
+                return@withContext TtsAudioData(
+                    null, null, null,
+                    error = result.error ?: "Adreno TTS synthesis failed"
+                )
+            }
+
+            // Save to WAV file
+            val wavResult = adrenoTtsEngine.saveToWavFile(result.audioData, outputFile)
+            if (wavResult.isFailure) {
+                return@withContext TtsAudioData(
+                    null, null, null,
+                    error = "Failed to save audio: ${wavResult.exceptionOrNull()?.message}"
+                )
+            }
+
+            TtsAudioData(wavResult.getOrThrow(), text, emptyList())
+
+        } catch (e: Exception) {
+            Timber.tag("TTS_ADRENO").e(e, "Adreno TTS synthesis failed")
+            TtsAudioData(null, null, null, error = e.message ?: "Adreno TTS failed")
+        }
+    }
+
     private suspend fun synthesizeRemoteApiTtsChunk(
         text: String,
         cacheFile: File?
@@ -1089,6 +1169,15 @@ class TtsService : MediaSessionService() {
                         TtsAudioData(audioFile = cacheFile, serverText = text, wordTimings = emptyList(), error = null, streamUri = null)
                     } else {
                         synthesizeRemoteApiTtsChunk(text, cacheFile)
+                    }
+                }
+                TtsMode.ADRENO_GPU -> {
+                    val cacheFile = cacheManager.getCacheFile(bookTitle, chapterTitle, text, "adreno", mode)
+                    if (cacheFile.exists() && cacheFile.length() > 44) {
+                        Timber.tag("TTS_ADRENO").i("Using cached Adreno TTS audio for chunk $chunkIndex")
+                        TtsAudioData(audioFile = cacheFile, serverText = text, wordTimings = emptyList(), error = null, streamUri = null)
+                    } else {
+                        synthesizeAdrenoGpuTtsChunk(text, cacheFile)
                     }
                 }
             }
@@ -1216,6 +1305,9 @@ class TtsService : MediaSessionService() {
         }
         if (::pocketTtsSynthesizer.isInitialized) {
             pocketTtsSynthesizer.release()
+        }
+        if (::adrenoTtsEngine.isInitialized) {
+            adrenoTtsEngine.destroy()
         }
         if (::playbackManager.isInitialized) {
             playbackManager.release()
