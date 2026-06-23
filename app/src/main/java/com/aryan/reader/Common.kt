@@ -67,6 +67,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
@@ -87,7 +88,10 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RichTooltip
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -112,6 +116,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -179,6 +184,7 @@ import com.aryan.reader.tts.GEMINI_TTS_SPEAKERS
 import com.aryan.reader.tts.SpeakerSamplePlayer
 import com.aryan.reader.tts.TtsCacheManager
 import com.aryan.reader.tts.TtsPlaybackManager
+import com.aryan.reader.tts.PocketTtsSynthesizer
 import com.aryan.reader.tts.formatBytes
 import com.aryan.reader.tts.loadTtsMode
 import com.aryan.reader.tts.rememberTtsController
@@ -1819,7 +1825,8 @@ fun TtsSettingsSheet(
                 0 -> AiVoicesTab(currentSpeakerId, onSpeakerChange, isTtsActive, samplePlayer, currentMode)
                 1 -> DeviceVoicesTab(isTtsActive, context, currentMode)
                 2 -> if (currentMode == TtsPlaybackManager.TtsMode.POCKET) {
-                    PocketTtsInfoTab()
+                    val synth = remember { PocketTtsSynthesizer(context) }
+                    PocketTtsSettingsTab(context = context, synthesizer = synth, scope = scope)
                 } else {
                     TtsCacheTab(bookTitle, context, currentSpeakerId)
                 }
@@ -1829,10 +1836,139 @@ fun TtsSettingsSheet(
 }
 
 @Composable
-private fun PocketTtsInfoTab() {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+fun PocketTtsSettingsTab(
+    context: Context,
+    synthesizer: PocketTtsSynthesizer?,
+    scope: CoroutineScope
+) {
+    val downloadedModels = remember { mutableStateListOf<String>() }
+    val selectedModel = remember { mutableStateOf(synthesizer?.getCurrentModelName() ?: "") }
+    val isDownloading = remember { mutableStateOf(false) }
+    val downloadProgress = remember { mutableFloatStateOf(0f) }
+    val showModelPicker = remember { mutableStateOf(false) }
+    val errorMessage = remember { mutableStateOf<String?>(null) }
+
+    fun refreshModels() {
+        downloadedModels.clear()
+        downloadedModels.addAll(PocketTtsSynthesizer.getDownloadedModels(context))
+        selectedModel.value = synthesizer?.getCurrentModelName() ?: ""
+    }
+
+    LaunchedEffect(Unit) { refreshModels() }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (errorMessage.value != null) {
+            Surface(color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(12.dp)) {
+                    Text(errorMessage.value ?: "", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { errorMessage.value = null }) {
+                        Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = MaterialTheme.colorScheme.onErrorContainer)
+                    }
+                }
+            }
+        }
+
         Text(stringResource(R.string.tts_pocket_title), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         Text(stringResource(R.string.tts_pocket_desc), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        if (downloadedModels.isNotEmpty()) {
+            Text("Downloaded models", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            downloadedModels.forEach { modelName ->
+                val modelInfo = PocketTtsSynthesizer.AVAILABLE_MODELS.find { it.name == modelName }
+                val displayName = modelInfo?.displayName ?: modelName
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            selectedModel.value = modelName
+                            synthesizer?.setCurrentModelName(modelName)
+                        }
+                        .padding(vertical = 4.dp)
+                ) {
+                    RadioButton(
+                        selected = selectedModel.value == modelName,
+                        onClick = {
+                            selectedModel.value = modelName
+                            synthesizer?.setCurrentModelName(modelName)
+                        }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(displayName, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        } else {
+            Text("No models downloaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        if (selectedModel.value.isBlank() || !PocketTtsSynthesizer.isModelDownloaded(context, selectedModel.value)) {
+            Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.tts_pocket_no_model), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.padding(12.dp))
+            }
+        }
+
+        if (isDownloading.value) {
+            LinearProgressIndicator(progress = { downloadProgress.value }, modifier = Modifier.fillMaxWidth().height(8.dp))
+            Text("Downloading... ${(downloadProgress.value * 100).toInt()}%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Button(
+                onClick = { showModelPicker.value = true },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isDownloading.value
+            ) {
+                Icon(Icons.Default.Download, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Download model")
+            }
+        }
+    }
+
+    if (showModelPicker.value) {
+        AlertDialog(
+            onDismissRequest = { showModelPicker.value = false },
+            title = { Text("Choose a model to download") },
+            text = {
+                Column {
+                    PocketTtsSynthesizer.AVAILABLE_MODELS.forEach { model ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable(enabled = !isDownloading.value) {
+                                    showModelPicker.value = false
+                                    isDownloading.value = true
+                                    downloadProgress.value = 0f
+                                    scope.launch(Dispatchers.IO) {
+                                        val result = synthesizer?.downloadModel(model) { progress ->
+                                            downloadProgress.value = progress
+                                        }
+                                        withContext(Dispatchers.Main) {
+                                            isDownloading.value = false
+                                            result?.onSuccess {
+                                                errorMessage.value = null
+                                                refreshModels()
+                                            }?.onFailure { e ->
+                                                errorMessage.value = "Download failed: ${e.message}"
+                                            }
+                                        }
+                                    }
+                                },
+                            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(model.displayName, style = MaterialTheme.typography.labelMedium)
+                                Text(model.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showModelPicker.value = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
