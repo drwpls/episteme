@@ -42,24 +42,30 @@ class AdrenoTtsModelManager(private val context: Context) {
         const val VOICE_PACK_SIZE_BYTES = 520_000L      // ~520 KB per voice
         const val ESPEAK_DATA_SIZE_BYTES = 936_000L     // ~936 KB for English
         
-        // HuggingFace model repository (a8nova's adreno-llms-weights)
-        // Using direct HF URL for now - can be mirrored to GitHub releases later
+        // GitHub releases for model files (forked from a8nova/adreno-llms)
+        const val GITHUB_REPO_BASE = "https://github.com/drwpls/adreno-llms/releases/download/v1.0.0"
+        // HuggingFace for additional data files
         const val HF_REPO_BASE = "https://huggingface.co/a8nova/adreno-llms-weights/resolve/main/kokoro-82m"
         
-        // Required files
+        // Required files with their source
         val REQUIRED_FILES = listOf(
-            ModelFile("model.bin", MODEL_FILE_SIZE_BYTES, "Kokoro-82M model weights"),
-            ModelFile("tokenizer.json", 50_000L, "Tokenizer configuration"),
-            ModelFile("config.json", 10_000L, "Model configuration"),
-            ModelFile("espeak-data/en_dict", ESPEAK_DATA_SIZE_BYTES, "English phonemizer data"),
-            ModelFile("voices/af_heart.bin", VOICE_PACK_SIZE_BYTES, "Default voice pack")
+            ModelFile("model.bin", MODEL_FILE_SIZE_BYTES, "Kokoro-82M model weights", GITHUB_REPO_BASE),
+            ModelFile("phoneme_vocab.tsv", 1_000L, "Phoneme vocabulary", GITHUB_REPO_BASE),
+            ModelFile("test_input_ids.bin", 1_000L, "Test input IDs", GITHUB_REPO_BASE)
+        )
+        
+        // Optional/additional files from HuggingFace
+        val HF_FILES = listOf(
+            ModelFile("espeak-data/en_dict", ESPEAK_DATA_SIZE_BYTES, "English phonemizer data", HF_REPO_BASE),
+            ModelFile("voices/af_heart.bin", VOICE_PACK_SIZE_BYTES, "Default voice pack", HF_REPO_BASE)
         )
     }
     
     data class ModelFile(
         val path: String,
         val sizeBytes: Long,
-        val description: String
+        val description: String,
+        val baseUrl: String = HF_REPO_BASE
     )
     
     data class DownloadProgress(
@@ -175,7 +181,7 @@ class AdrenoTtsModelManager(private val context: Context) {
                 )
                 
                 val request = Request.Builder()
-                    .url("$HF_REPO_BASE/${modelFile.path}")
+                    .url("${modelFile.baseUrl}/${modelFile.path}")
                     .build()
                 
                 httpClient.newCall(request).execute().use { response ->
