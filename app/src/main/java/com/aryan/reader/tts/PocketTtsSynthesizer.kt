@@ -325,7 +325,8 @@ class PocketTtsSynthesizer(private val context: Context) {
         ttsConfig.maxNumSentences = 1
         ttsConfig.silenceScale = 0.2f
 
-        val tts = OfflineTts(context.assets, ttsConfig)
+        val assetManager = if (useFileModel) null else context.assets
+        val tts = OfflineTts(assetManager, ttsConfig)
         offlineTts = tts
         loadedModelName = if (useFileModel) selectedModel else "@assets"
         return tts
