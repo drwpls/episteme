@@ -1880,6 +1880,8 @@ fun PocketTtsSettingsTab(
 
     LaunchedEffect(Unit) { refreshModels() }
 
+    var pendingImportName by remember { mutableStateOf("") }
+
     val importFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         onOpStatus(SherpaOpStatus(SherpaOpPhase.COPYING, 0f))
@@ -1899,8 +1901,6 @@ fun PocketTtsSettingsTab(
             }
         }
     }
-
-    var pendingImportName by remember { mutableStateOf("") }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (errorMessage.value != null) {
