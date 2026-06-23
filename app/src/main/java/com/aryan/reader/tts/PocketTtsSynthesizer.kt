@@ -179,7 +179,7 @@ class PocketTtsSynthesizer(private val context: Context) {
                 .all { File(dir, it).exists() }
         }
 
-        private fun resolveFileName(uri: Uri): String {
+        private fun resolveFileName(context: Context, uri: Uri): String {
             val cursor = try {
                 context.contentResolver.query(uri, null, null, null, null)
             } catch (_: Exception) { null }
@@ -300,7 +300,7 @@ class PocketTtsSynthesizer(private val context: Context) {
         try {
             val modelDir = File(getModelsDirectory(context), modelName)
             modelDir.mkdirs()
-            val fileName = resolveFileName(uri)
+            val fileName = resolveFileName(context, uri)
             val cacheFile = File(context.cacheDir, fileName)
 
             val input = context.contentResolver.openInputStream(uri)
