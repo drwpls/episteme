@@ -1764,6 +1764,9 @@ fun TtsSettingsSheet(
         SpeakerSamplePlayer(context, scope, getAuthToken = getAuthToken)
     }
 
+    val synth = remember { PocketTtsSynthesizer(context) }
+    var pocketOpStatus by remember { mutableStateOf<SherpaOpStatus?>(null) }
+
     DisposableEffect(Unit) { onDispose { samplePlayer.release() } }
 
     ModalBottomSheet(
@@ -1813,6 +1816,17 @@ fun TtsSettingsSheet(
                     }
             }
 
+            pocketOpStatus?.let { status ->
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(progress = { status.progress }, modifier = Modifier.fillMaxWidth().height(6.dp))
+                val label = when (status.phase) {
+                    SherpaOpPhase.DOWNLOADING -> "Downloading"
+                    SherpaOpPhase.EXTRACTING -> "Extracting"
+                    SherpaOpPhase.COPYING -> "Importing"
+                }
+                Text("$label... ${(status.progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            }
+
             Spacer(Modifier.height(16.dp))
 
             TabRow(selectedTabIndex = selectedTabIndex, containerColor = Color.Transparent, divider = {}) {
@@ -1827,8 +1841,14 @@ fun TtsSettingsSheet(
                 0 -> AiVoicesTab(currentSpeakerId, onSpeakerChange, isTtsActive, samplePlayer, currentMode)
                 1 -> DeviceVoicesTab(isTtsActive, context, currentMode)
                 2 -> if (currentMode == TtsPlaybackManager.TtsMode.POCKET) {
-                    val synth = remember { PocketTtsSynthesizer(context) }
-                    PocketTtsSettingsTab(context = context, synthesizer = synth, scope = scope)
+                    PocketTtsSettingsTab(
+                        context = context,
+                        synthesizer = synth,
+                        scope = scope,
+                        opStatus = pocketOpStatus,
+                        onOpStatus = { pocketOpStatus = it },
+                        onModelsChanged = { /* models refresh happens in tab's LaunchedEffect */ }
+                    )
                 } else {
                     TtsCacheTab(bookTitle, context, currentSpeakerId)
                 }
@@ -1841,11 +1861,13 @@ fun TtsSettingsSheet(
 fun PocketTtsSettingsTab(
     context: Context,
     synthesizer: PocketTtsSynthesizer?,
-    scope: CoroutineScope
+    scope: CoroutineScope,
+    opStatus: SherpaOpStatus?,
+    onOpStatus: (SherpaOpStatus?) -> Unit,
+    onModelsChanged: () -> Unit
 ) {
     val downloadedModels = remember { mutableStateListOf<String>() }
     val selectedModel = remember { mutableStateOf(synthesizer?.getCurrentModelName() ?: "") }
-    var opStatus by remember { mutableStateOf<SherpaOpStatus?>(null) }
     val showModelPicker = remember { mutableStateOf(false) }
     val showCustomUrl = remember { mutableStateOf(false) }
     val customUrl = remember { mutableStateOf("") }
@@ -1859,6 +1881,7 @@ fun PocketTtsSettingsTab(
         downloadedModels.clear()
         downloadedModels.addAll(PocketTtsSynthesizer.getDownloadedModels(context))
         selectedModel.value = synthesizer?.getCurrentModelName() ?: ""
+        onModelsChanged()
     }
 
     LaunchedEffect(Unit) { refreshModels() }
@@ -1866,11 +1889,11 @@ fun PocketTtsSettingsTab(
     val importFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val name = importModelName.value.trim()
         if (uri == null || name.isBlank()) return@rememberLauncherForActivityResult
-        opStatus = SherpaOpStatus(SherpaOpPhase.COPYING, 0f)
+        onOpStatus(SherpaOpStatus(SherpaOpPhase.COPYING, 0f))
         showImportPicker.value = false
         scope.launch(Dispatchers.IO) {
             val result = synthesizer?.importModelFile(uri, name) { status ->
-                opStatus = status
+                onOpStatus(status)
             }
             withContext(Dispatchers.Main) {
                 result?.onSuccess {
@@ -1880,7 +1903,7 @@ fun PocketTtsSettingsTab(
                 }?.onFailure { e ->
                     errorMessage.value = "Import failed: ${e.message}"
                 }
-                opStatus = null
+                onOpStatus(null)
             }
         }
     }
@@ -1936,16 +1959,7 @@ fun PocketTtsSettingsTab(
             }
         }
 
-        if (isBusy) {
-            val status = opStatus!!
-            LinearProgressIndicator(progress = { status.progress }, modifier = Modifier.fillMaxWidth().height(8.dp))
-            val label = when (status.phase) {
-                SherpaOpPhase.DOWNLOADING -> "Downloading"
-                SherpaOpPhase.EXTRACTING -> "Extracting"
-                SherpaOpPhase.COPYING -> "Importing"
-            }
-            Text("$label... ${(status.progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else {
+        if (!isBusy) {
             Button(
                 onClick = { showModelPicker.value = true },
                 modifier = Modifier.fillMaxWidth()
@@ -2005,11 +2019,11 @@ fun PocketTtsSettingsTab(
                         errorMessage.value = "Invalid URL"
                         return@Button
                     }
-                    opStatus = SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f)
+                    onOpStatus(SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f))
                     showCustomUrl.value = false
                     scope.launch(Dispatchers.IO) {
                         val result = synthesizer?.downloadFromUrl(url, name) { status ->
-                            opStatus = status
+                            onOpStatus(status)
                         }
                         withContext(Dispatchers.Main) {
                             result?.onSuccess {
@@ -2020,7 +2034,7 @@ fun PocketTtsSettingsTab(
                             }?.onFailure { e ->
                                 errorMessage.value = "Download failed: ${e.message}"
                             }
-                            opStatus = null
+                            onOpStatus(null)
                         }
                     }
                 },
@@ -2073,10 +2087,10 @@ fun PocketTtsSettingsTab(
                                 .padding(vertical = 4.dp)
                                 .clickable(enabled = !isBusy) {
                                     showModelPicker.value = false
-                                    opStatus = SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f)
+                                    onOpStatus(SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f))
                                     scope.launch(Dispatchers.IO) {
                                         val result = synthesizer?.downloadModel(model) { status ->
-                                            opStatus = status
+                                            onOpStatus(status)
                                         }
                                         withContext(Dispatchers.Main) {
                                             result?.onSuccess {
@@ -2085,7 +2099,7 @@ fun PocketTtsSettingsTab(
                                             }?.onFailure { e ->
                                                 errorMessage.value = "Download failed: ${e.message}"
                                             }
-                                            opStatus = null
+                                            onOpStatus(null)
                                         }
                                     }
                                 },
