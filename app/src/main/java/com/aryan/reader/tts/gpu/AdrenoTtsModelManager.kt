@@ -51,13 +51,13 @@ class AdrenoTtsModelManager(private val context: Context) {
         val REQUIRED_FILES = listOf(
             ModelFile("model.bin", MODEL_FILE_SIZE_BYTES, "Kokoro-82M model weights", GITHUB_REPO_BASE),
             ModelFile("phoneme_vocab.tsv", 1_000L, "Phoneme vocabulary", GITHUB_REPO_BASE),
-            ModelFile("test_input_ids.bin", 1_000L, "Test input IDs", GITHUB_REPO_BASE)
+            ModelFile("test_input_ids.bin", 1_000L, "Test input IDs", GITHUB_REPO_BASE),
+            ModelFile("voices/af_heart.bin", VOICE_PACK_SIZE_BYTES, "Default voice pack", HF_REPO_BASE)
         )
         
         // Optional/additional files from HuggingFace
         val HF_FILES = listOf(
-            ModelFile("espeak-data/en_dict", ESPEAK_DATA_SIZE_BYTES, "English phonemizer data", HF_REPO_BASE),
-            ModelFile("voices/af_heart.bin", VOICE_PACK_SIZE_BYTES, "Default voice pack", HF_REPO_BASE)
+            ModelFile("espeak-data/en_dict", ESPEAK_DATA_SIZE_BYTES, "English phonemizer data", HF_REPO_BASE)
         )
     }
     
