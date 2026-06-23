@@ -1953,6 +1953,33 @@ fun PocketTtsSettingsTab(
             }
         }
 
+        val selectedModelInfo = PocketTtsSynthesizer.getModelInfo(selectedModel.value)
+        if (selectedModelInfo != null && selectedModelInfo.numSpeakers > 1) {
+            val currentSid = remember(selectedModel.value) { mutableIntStateOf(PocketTtsSynthesizer.getSid(context, selectedModel.value)) }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Voice ", style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.width(4.dp))
+                Text("(${currentSid.value + 1}/${selectedModelInfo.numSpeakers})", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = {
+                    val next = (currentSid.value - 1).coerceAtLeast(0)
+                    currentSid.value = next
+                    PocketTtsSynthesizer.setSid(context, selectedModel.value, next)
+                }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Previous voice")
+                }
+                IconButton(onClick = {
+                    val next = (currentSid.value + 1).coerceAtMost(selectedModelInfo.numSpeakers - 1)
+                    currentSid.value = next
+                    PocketTtsSynthesizer.setSid(context, selectedModel.value, next)
+                }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Next voice")
+                }
+            }
+        }
+
         if (opStatus == null) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(

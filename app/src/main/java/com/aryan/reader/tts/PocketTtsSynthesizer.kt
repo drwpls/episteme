@@ -33,6 +33,7 @@ private const val NUM_THREADS = 2
 private const val NUM_STEPS = 2
 private const val PREFS_NAME = "sherpa_onnx_prefs"
 private const val KEY_SELECTED_MODEL = "selected_model"
+private const val KEY_SID = "model_sid"
 private const val MODELS_SUBDIR = "sherpa-onnx-models"
 
 enum class ModelType { POCKET, KOKORO }
@@ -46,6 +47,7 @@ data class SherpaOnnxModel(
     val url: String,
     val description: String,
     val modelType: ModelType,
+    val numSpeakers: Int = 1,
     val huggingfaceUrl: String? = null
 )
 
@@ -78,6 +80,7 @@ class PocketTtsSynthesizer(private val context: Context) {
                 url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
                 description = "~333 MB, 53 speakers, Chinese + English",
                 modelType = ModelType.KOKORO,
+                numSpeakers = 53,
                 huggingfaceUrl = "https://huggingface.co/csukuangfj2/kokoro-multi-lang-v1_0"
             ),
             SherpaOnnxModel(
@@ -86,6 +89,7 @@ class PocketTtsSynthesizer(private val context: Context) {
                 url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
                 description = "~305 MB, 11 speakers, English",
                 modelType = ModelType.KOKORO,
+                numSpeakers = 11,
                 huggingfaceUrl = "https://huggingface.co/csukuangfj2/sherpa-onnx-kokoro-en-v0_19"
             )
         )
@@ -117,6 +121,18 @@ class PocketTtsSynthesizer(private val context: Context) {
         fun getModelFile(context: Context, modelName: String, relativePath: String): File {
             return File(getModelsDirectory(context), "$modelName/$relativePath")
         }
+
+        fun getSid(context: Context, modelName: String): Int {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getInt("${KEY_SID}_$modelName", 0)
+        }
+
+        fun setSid(context: Context, modelName: String, sid: Int) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putInt("${KEY_SID}_$modelName", sid).apply()
+        }
+
+        fun getModelInfo(modelName: String): SherpaOnnxModel? = AVAILABLE_MODELS.find { it.name == modelName }
 
         fun isModelDownloaded(context: Context, modelName: String): Boolean {
             val modelDir = File(getModelsDirectory(context), modelName)
@@ -516,7 +532,7 @@ class PocketTtsSynthesizer(private val context: Context) {
                 genConfig.extra = mapOf("temperature" to "0.7", "chunk_size" to "15")
             }
             ModelType.KOKORO -> {
-                genConfig.sid = 0
+                genConfig.sid = getSid(context, selectedModel)
             }
         }
         genConfig.speed = loadTtsSpeechRate(context)
