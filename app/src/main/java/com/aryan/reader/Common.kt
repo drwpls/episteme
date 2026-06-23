@@ -60,7 +60,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
@@ -1984,7 +1983,7 @@ fun PocketTtsSettingsTab(
         if (selectedModelInfo != null && selectedModelInfo.numSpeakers > 1) {
             val currentSid = remember(selectedModel.value) { mutableIntStateOf(PocketTtsSynthesizer.getSid(context, selectedModel.value)) }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Smartphone, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Voice ", style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.width(4.dp))
