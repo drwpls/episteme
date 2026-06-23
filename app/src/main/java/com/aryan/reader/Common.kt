@@ -1875,7 +1875,6 @@ fun PocketTtsSettingsTab(
     val showImportPicker = remember { mutableStateOf(false) }
     val importModelName = remember { mutableStateOf("") }
     val errorMessage = remember { mutableStateOf<String?>(null) }
-    val isBusy get() = opStatus != null
 
     fun refreshModels() {
         downloadedModels.clear()
@@ -1959,7 +1958,7 @@ fun PocketTtsSettingsTab(
             }
         }
 
-        if (!isBusy) {
+        if (opStatus == null) {
             Button(
                 onClick = { showModelPicker.value = true },
                 modifier = Modifier.fillMaxWidth()
@@ -2085,7 +2084,7 @@ fun PocketTtsSettingsTab(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp)
-                                .clickable(enabled = !isBusy) {
+                                .clickable(enabled = opStatus == null) {
                                     showModelPicker.value = false
                                     onOpStatus(SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f))
                                     scope.launch(Dispatchers.IO) {
