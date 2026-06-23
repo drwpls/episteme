@@ -79,6 +79,9 @@ set(BUILD_SHARED_LIBS OFF)
 set_target_properties(mobi PROPERTIES C_VISIBILITY_PRESET default)
 
 
+# Find the Android logging library (needed for both native-lib and adreno_tts)
+find_library(log-lib log)
+
 # ===================================================================
 # ADRENO TTS GPU ACCELERATION
 # ===================================================================
@@ -121,8 +124,7 @@ target_include_directories(native-lib
         ${CMAKE_CURRENT_SOURCE_DIR}/libmobi/src
 )
 
-# 8. Find the Android logging and zlib libraries.
-find_library(log-lib log)
+# 8. Find the zlib library.
 find_library(z-lib z)
 
 # 9. Link our final library against all the static libraries and Android libraries.
