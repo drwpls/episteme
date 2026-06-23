@@ -181,51 +181,39 @@ class PocketTtsSynthesizer(private val context: Context) {
 
         val useFileModel = selectedModel.isNotBlank() && isModelDownloaded(context, selectedModel)
 
-        val pocketConfig = if (useFileModel) {
+        val pocketConfig = OfflineTtsPocketModelConfig()
+        if (useFileModel) {
             val modelDir = File(getModelsDirectory(context), selectedModel).absolutePath
-            OfflineTtsPocketModelConfig.builder()
-                .setLmFlow("$modelDir/lm_flow.int8.onnx")
-                .setLmMain("$modelDir/lm_main.int8.onnx")
-                .setEncoder("$modelDir/encoder.onnx")
-                .setDecoder("$modelDir/decoder.int8.onnx")
-                .setTextConditioner("$modelDir/text_conditioner.onnx")
-                .setVocabJson("$modelDir/vocab.json")
-                .setTokenScoresJson("$modelDir/token_scores.json")
-                .build()
+            pocketConfig.lmFlow = "$modelDir/lm_flow.int8.onnx"
+            pocketConfig.lmMain = "$modelDir/lm_main.int8.onnx"
+            pocketConfig.encoder = "$modelDir/encoder.onnx"
+            pocketConfig.decoder = "$modelDir/decoder.int8.onnx"
+            pocketConfig.textConditioner = "$modelDir/text_conditioner.onnx"
+            pocketConfig.vocabJson = "$modelDir/vocab.json"
+            pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
         } else {
             val modelDir = BuildConfig.POCKET_TTS_MODEL_DIR.trim().trim('/')
-            OfflineTtsPocketModelConfig.builder()
-                .setLmFlow("$modelDir/lm_flow.int8.onnx")
-                .setLmMain("$modelDir/lm_main.int8.onnx")
-                .setEncoder("$modelDir/encoder.onnx")
-                .setDecoder("$modelDir/decoder.int8.onnx")
-                .setTextConditioner("$modelDir/text_conditioner.onnx")
-                .setVocabJson("$modelDir/vocab.json")
-                .setTokenScoresJson("$modelDir/token_scores.json")
-                .build()
+            pocketConfig.lmFlow = "$modelDir/lm_flow.int8.onnx"
+            pocketConfig.lmMain = "$modelDir/lm_main.int8.onnx"
+            pocketConfig.encoder = "$modelDir/encoder.onnx"
+            pocketConfig.decoder = "$modelDir/decoder.int8.onnx"
+            pocketConfig.textConditioner = "$modelDir/text_conditioner.onnx"
+            pocketConfig.vocabJson = "$modelDir/vocab.json"
+            pocketConfig.tokenScoresJson = "$modelDir/token_scores.json"
         }
 
-        val modelConfig = OfflineTtsModelConfig.builder()
-            .setPocket(pocketConfig)
-            .setNumThreads(POCKET_TTS_NUM_THREADS)
-            .setDebug(BuildConfig.DEBUG)
-            .setProvider("cpu")
-            .build()
+        val modelConfig = OfflineTtsModelConfig()
+        modelConfig.pocket = pocketConfig
+        modelConfig.numThreads = POCKET_TTS_NUM_THREADS
+        modelConfig.debug = BuildConfig.DEBUG
+        modelConfig.provider = "cpu"
 
-        val config = OfflineTtsConfig.builder()
-            .setModel(modelConfig)
-            .setMaxNumSentences(1)
-            .setSilenceScale(0.2f)
-            .build()
+        val ttsConfig = OfflineTtsConfig()
+        ttsConfig.model = modelConfig
+        ttsConfig.maxNumSentences = 1
+        ttsConfig.silenceScale = 0.2f
 
-        val tts = if (useFileModel) {
-            runCatching { OfflineTts(config) }.getOrElse {
-                OfflineTts(context.assets, config)
-            }
-        } else {
-            OfflineTts(context.assets, config)
-        }
-
+        val tts = OfflineTts(context.assets, ttsConfig)
         offlineTts = tts
         loadedModelName = if (useFileModel) selectedModel else "@assets"
         return tts
@@ -245,15 +233,12 @@ class PocketTtsSynthesizer(private val context: Context) {
         }
 
         val genConfig = GenerationConfig()
-        genConfig.setReferenceAudio(referenceWave.samples)
-        genConfig.setReferenceSampleRate(referenceWave.sampleRate)
-        genConfig.setNumSteps(POCKET_TTS_NUM_STEPS)
-        genConfig.setSpeed(loadTtsSpeechRate(context))
-        genConfig.setSilenceScale(0.2f)
-        val extra = java.util.HashMap<String, String>()
-        extra["temperature"] = "0.7"
-        extra["chunk_size"] = "15"
-        genConfig.setExtra(extra)
+        genConfig.referenceAudio = referenceWave.samples
+        genConfig.referenceSampleRate = referenceWave.sampleRate
+        genConfig.numSteps = POCKET_TTS_NUM_STEPS
+        genConfig.speed = loadTtsSpeechRate(context)
+        genConfig.silenceScale = 0.2f
+        genConfig.extra = mapOf("temperature" to "0.7", "chunk_size" to "15")
         return genConfig
     }
 
