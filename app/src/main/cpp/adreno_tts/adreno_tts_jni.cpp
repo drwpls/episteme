@@ -15,12 +15,90 @@
 #include <mutex>
 #include <functional>
 #include <android/log.h>
-#include <CL/opencl.h>
+#include <dlfcn.h>
 
 #define LOG_TAG "ADRENO_TTS_JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+
+// OpenCL types and functions for dynamic loading
+typedef int32_t cl_int;
+typedef uint32_t cl_uint;
+typedef uint64_t cl_ulong;
+typedef void* cl_platform_id;
+typedef void* cl_device_id;
+
+#define CL_SUCCESS 0
+#define CL_DEVICE_TYPE_GPU 0x4
+#define CL_PLATFORM_NAME 0x0902
+#define CL_PLATFORM_VENDOR 0x0903
+#define CL_PLATFORM_VERSION 0x0904
+#define CL_DEVICE_NAME 0x102B
+#define CL_DEVICE_VERSION 0x102F
+#define CL_DEVICE_EXTENSIONS 0x1030
+#define CL_DEVICE_GLOBAL_MEM_SIZE 0x102C
+
+// Function pointers for OpenCL
+typedef cl_int (*clGetPlatformIDs_fn)(cl_uint, cl_platform_id*, cl_uint*);
+typedef cl_int (*clGetDeviceIDs_fn)(cl_platform_id, cl_uint, cl_uint, cl_device_id*, cl_uint*);
+typedef cl_int (*clGetPlatformInfo_fn)(cl_platform_id, cl_uint, size_t, void*, size_t*);
+typedef cl_int (*clGetDeviceInfo_fn)(cl_device_id, cl_uint, size_t, void*, size_t*);
+
+static struct {
+    void* handle;
+    clGetPlatformIDs_fn clGetPlatformIDs;
+    clGetDeviceIDs_fn clGetDeviceIDs;
+    clGetPlatformInfo_fn clGetPlatformInfo;
+    clGetDeviceInfo_fn clGetDeviceInfo;
+} g_opencl = {nullptr, nullptr, nullptr, nullptr, nullptr};
+
+// Load OpenCL library dynamically
+static bool loadOpenCL() {
+    if (g_opencl.handle != nullptr) {
+        return true;
+    }
+    
+    // Try different paths for OpenCL library
+    const char* paths[] = {
+        "libOpenCL.so",
+        "/system/vendor/lib/libOpenCL.so",
+        "/system/lib/libOpenCL.so",
+        "/system/vendor/lib64/libOpenCL.so",
+        "/system/lib64/libOpenCL.so",
+        "/system/lib/egl/libOpenCL.so",
+        "/system/vendor/lib/egl/libOpenCL.so"
+    };
+    
+    for (const char* path : paths) {
+        g_opencl.handle = dlopen(path, RTLD_NOW);
+        if (g_opencl.handle != nullptr) {
+            LOGD("Loaded OpenCL from: %s", path);
+            break;
+        }
+    }
+    
+    if (g_opencl.handle == nullptr) {
+        LOGD("Failed to load OpenCL library");
+        return false;
+    }
+    
+    // Load function pointers
+    g_opencl.clGetPlatformIDs = (clGetPlatformIDs_fn)dlsym(g_opencl.handle, "clGetPlatformIDs");
+    g_opencl.clGetDeviceIDs = (clGetDeviceIDs_fn)dlsym(g_opencl.handle, "clGetDeviceIDs");
+    g_opencl.clGetPlatformInfo = (clGetPlatformInfo_fn)dlsym(g_opencl.handle, "clGetPlatformInfo");
+    g_opencl.clGetDeviceInfo = (clGetDeviceInfo_fn)dlsym(g_opencl.handle, "clGetDeviceInfo");
+    
+    if (!g_opencl.clGetPlatformIDs || !g_opencl.clGetDeviceIDs || 
+        !g_opencl.clGetPlatformInfo || !g_opencl.clGetDeviceInfo) {
+        LOGD("Failed to load OpenCL function pointers");
+        dlclose(g_opencl.handle);
+        g_opencl.handle = nullptr;
+        return false;
+    }
+    
+    return true;
+}
 
 // Forward declarations for a8nova's Kokoro implementation
 // These would be implemented based on a8nova's actual C++ code
@@ -68,17 +146,22 @@ static std::mutex g_enginesMutex;
 
 // Check if OpenCL is available and Adreno GPU is present
 static bool checkAdrenoGpu() {
+    if (!loadOpenCL()) {
+        LOGD("Failed to load OpenCL");
+        return false;
+    }
+    
     cl_platform_id platform;
     cl_uint numPlatforms;
     
-    cl_int err = clGetPlatformIDs(1, &platform, &numPlatforms);
+    cl_int err = g_opencl.clGetPlatformIDs(1, &platform, &numPlatforms);
     if (err != CL_SUCCESS || numPlatforms == 0) {
         LOGD("No OpenCL platforms found");
         return false;
     }
     
     char platformName[256];
-    clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platformName), platformName, nullptr);
+    g_opencl.clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platformName), platformName, nullptr);
     LOGD("OpenCL Platform: %s", platformName);
     
     // Check for Qualcomm/Adreno
@@ -91,14 +174,14 @@ static bool checkAdrenoGpu() {
     
     cl_device_id device;
     cl_uint numDevices;
-    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, &numDevices);
+    err = g_opencl.clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, &numDevices);
     if (err != CL_SUCCESS || numDevices == 0) {
         LOGD("No GPU devices found");
         return false;
     }
     
     char deviceName[256];
-    clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(deviceName), deviceName, nullptr);
+    g_opencl.clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(deviceName), deviceName, nullptr);
     LOGD("OpenCL Device: %s", deviceName);
     
     // Check for Adreno
@@ -110,7 +193,7 @@ static bool checkAdrenoGpu() {
     
     // Check for cl_qcom_dot_product8 extension
     char extensions[4096];
-    clGetDeviceInfo(device, CL_DEVICE_EXTENSIONS, sizeof(extensions), extensions, nullptr);
+    g_opencl.clGetDeviceInfo(device, CL_DEVICE_EXTENSIONS, sizeof(extensions), extensions, nullptr);
     std::string extStr(extensions);
     
     bool hasDotProduct8 = extStr.find("cl_qcom_dot_product8") != std::string::npos;
@@ -137,17 +220,22 @@ JNIEXPORT jstring JNICALL
 Java_com_aryan_reader_tts_gpu_AdrenoTtsEngine_nativeGetGpuInfo(JNIEnv* env, jclass clazz) {
     std::string info;
     
+    if (!loadOpenCL()) {
+        info = "OpenCL not available";
+        return env->NewStringUTF(info.c_str());
+    }
+    
     cl_platform_id platform;
     cl_uint numPlatforms;
     
-    if (clGetPlatformIDs(1, &platform, &numPlatforms) == CL_SUCCESS && numPlatforms > 0) {
+    if (g_opencl.clGetPlatformIDs(1, &platform, &numPlatforms) == CL_SUCCESS && numPlatforms > 0) {
         char platformName[256];
         char platformVendor[256];
         char platformVersion[256];
         
-        clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platformName), platformName, nullptr);
-        clGetPlatformInfo(platform, CL_PLATFORM_VENDOR, sizeof(platformVendor), platformVendor, nullptr);
-        clGetPlatformInfo(platform, CL_PLATFORM_VERSION, sizeof(platformVersion), platformVersion, nullptr);
+        g_opencl.clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platformName), platformName, nullptr);
+        g_opencl.clGetPlatformInfo(platform, CL_PLATFORM_VENDOR, sizeof(platformVendor), platformVendor, nullptr);
+        g_opencl.clGetPlatformInfo(platform, CL_PLATFORM_VERSION, sizeof(platformVersion), platformVersion, nullptr);
         
         info += "Platform: " + std::string(platformName) + "\n";
         info += "Vendor: " + std::string(platformVendor) + "\n";
@@ -156,21 +244,21 @@ Java_com_aryan_reader_tts_gpu_AdrenoTtsEngine_nativeGetGpuInfo(JNIEnv* env, jcla
         cl_device_id device;
         cl_uint numDevices;
         
-        if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, &numDevices) == CL_SUCCESS) {
+        if (g_opencl.clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, &numDevices) == CL_SUCCESS) {
             char deviceName[256];
             char deviceVersion[256];
             cl_ulong globalMemSize;
             
-            clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(deviceName), deviceName, nullptr);
-            clGetDeviceInfo(device, CL_DEVICE_VERSION, sizeof(deviceVersion), deviceVersion, nullptr);
-            clGetDeviceInfo(device, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(globalMemSize), &globalMemSize, nullptr);
+            g_opencl.clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(deviceName), deviceName, nullptr);
+            g_opencl.clGetDeviceInfo(device, CL_DEVICE_VERSION, sizeof(deviceVersion), deviceVersion, nullptr);
+            g_opencl.clGetDeviceInfo(device, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(globalMemSize), &globalMemSize, nullptr);
             
             info += "Device: " + std::string(deviceName) + "\n";
             info += "Device Version: " + std::string(deviceVersion) + "\n";
             info += "Global Memory: " + std::to_string(globalMemSize / (1024 * 1024)) + " MB\n";
             
             char extensions[4096];
-            clGetDeviceInfo(device, CL_DEVICE_EXTENSIONS, sizeof(extensions), extensions, nullptr);
+            g_opencl.clGetDeviceInfo(device, CL_DEVICE_EXTENSIONS, sizeof(extensions), extensions, nullptr);
             info += "Extensions: " + std::string(extensions);
         }
     } else {
