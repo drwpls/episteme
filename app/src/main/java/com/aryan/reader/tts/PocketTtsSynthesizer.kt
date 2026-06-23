@@ -59,7 +59,7 @@ class PocketTtsSynthesizer(private val context: Context) {
                 name = "sherpa-onnx-pocket-tts-int8-2026-01-26",
                 displayName = "PocketTTS int8 (English)",
                 url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2",
-                description = "~65 MB, int8 quantized, English",
+                description = "~94 MB, int8 quantized, English",
                 modelType = ModelType.POCKET,
                 huggingfaceUrl = "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26"
             ),
@@ -67,7 +67,7 @@ class PocketTtsSynthesizer(private val context: Context) {
                 name = "sherpa-onnx-pocket-tts-2026-01-26",
                 displayName = "PocketTTS float32 (English, higher quality)",
                 url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-2026-01-26.tar.bz2",
-                description = "~250 MB, float32, English",
+                description = "~160 MB, float32, English",
                 modelType = ModelType.POCKET,
                 huggingfaceUrl = "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-2026-01-26"
             ),
@@ -75,17 +75,17 @@ class PocketTtsSynthesizer(private val context: Context) {
                 name = "kokoro-multi-lang-v1_0",
                 displayName = "Kokoro v1.0 (Chinese + English, 53 speakers)",
                 url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
-                description = "~300 MB, 53 speakers, Chinese + English",
+                description = "~333 MB, 53 speakers, Chinese + English",
                 modelType = ModelType.KOKORO,
-                huggingfaceUrl = null
+                huggingfaceUrl = "https://huggingface.co/csukuangfj2/kokoro-multi-lang-v1_0"
             ),
             SherpaOnnxModel(
                 name = "kokoro-en-v0_19",
                 displayName = "Kokoro v0.19 (English, 11 speakers)",
                 url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
-                description = "~100 MB, 11 speakers, English",
+                description = "~305 MB, 11 speakers, English",
                 modelType = ModelType.KOKORO,
-                huggingfaceUrl = "https://huggingface.co/RuiSumida/sherpa-onnx-kokoro-int8-en-v0_19"
+                huggingfaceUrl = "https://huggingface.co/csukuangfj2/sherpa-onnx-kokoro-en-v0_19"
             )
         )
 
