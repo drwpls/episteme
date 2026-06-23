@@ -1928,7 +1928,7 @@ fun PocketTtsSettingsTab(
                 onClick = { showCustomUrl.value = !showCustomUrl.value },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(Icons.Default.Link, contentDescription = null)
+                Icon(Icons.Default.Cloud, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text(if (showCustomUrl.value) "Hide custom URL" else "Download from custom URL")
             }
