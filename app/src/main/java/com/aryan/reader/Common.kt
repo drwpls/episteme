@@ -1869,11 +1869,8 @@ fun PocketTtsSettingsTab(
     val downloadedModels = remember { mutableStateListOf<String>() }
     val selectedModel = remember { mutableStateOf(synthesizer?.getCurrentModelName() ?: "") }
     val showModelPicker = remember { mutableStateOf(false) }
-    val showCustomUrl = remember { mutableStateOf(false) }
-    val customUrl = remember { mutableStateOf("") }
-    val customModelName = remember { mutableStateOf("") }
-    val showImportPicker = remember { mutableStateOf(false) }
-    val importModelName = remember { mutableStateOf("") }
+    val showCustomUrlDialog = remember { mutableStateOf(false) }
+    val showImportDialog = remember { mutableStateOf(false) }
     val errorMessage = remember { mutableStateOf<String?>(null) }
 
     fun refreshModels() {
@@ -1886,17 +1883,15 @@ fun PocketTtsSettingsTab(
     LaunchedEffect(Unit) { refreshModels() }
 
     val importFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        val name = importModelName.value.trim()
-        if (uri == null || name.isBlank()) return@rememberLauncherForActivityResult
+        if (uri == null) return@rememberLauncherForActivityResult
         onOpStatus(SherpaOpStatus(SherpaOpPhase.COPYING, 0f))
-        showImportPicker.value = false
+        showImportDialog.value = false
         scope.launch(Dispatchers.IO) {
-            val result = synthesizer?.importModelFile(uri, name) { status ->
+            val result = synthesizer?.importModelFile(uri, pendingImportName) { status ->
                 onOpStatus(status)
             }
             withContext(Dispatchers.Main) {
                 result?.onSuccess {
-                    importModelName.value = ""
                     errorMessage.value = null
                     refreshModels()
                 }?.onFailure { e ->
@@ -1906,6 +1901,8 @@ fun PocketTtsSettingsTab(
             }
         }
     }
+
+    var pendingImportName by remember { mutableStateOf("") }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (errorMessage.value != null) {
@@ -1959,118 +1956,140 @@ fun PocketTtsSettingsTab(
         }
 
         if (opStatus == null) {
-            Button(
-                onClick = { showModelPicker.value = true },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Default.Download, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Download predefined model")
-            }
-            Spacer(Modifier.height(4.dp))
-            TextButton(
-                onClick = { showCustomUrl.value = !showCustomUrl.value },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Default.Cloud, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text(if (showCustomUrl.value) "Hide custom URL" else "Download from URL")
-            }
-            Spacer(Modifier.height(4.dp))
-            TextButton(
-                onClick = { showImportPicker.value = !showImportPicker.value },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text(if (showImportPicker.value) "Hide import" else "Import from device")
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { showModelPicker.value = true },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Downloads", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Button(
+                    onClick = { showCustomUrlDialog.value = true },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Cloud, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("URL", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Button(
+                    onClick = { showImportDialog.value = true },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Import", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
+    }
 
-        if (showCustomUrl.value) {
-            OutlinedTextField(
-                value = customUrl.value,
-                onValueChange = { customUrl.value = it },
-                label = { Text("Archive URL (.tar.bz2, .tar.gz, .zip, .onnx)") },
-                placeholder = { Text("https://...") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            Spacer(Modifier.height(4.dp))
-            OutlinedTextField(
-                value = customModelName.value,
-                onValueChange = { customModelName.value = it },
-                label = { Text("Model name") },
-                placeholder = { Text("my-tts-model") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            Spacer(Modifier.height(4.dp))
-            Button(
-                onClick = {
-                    val url = customUrl.value.trim()
-                    val name = customModelName.value.trim()
-                    if (url.isBlank() || name.isBlank()) {
-                        errorMessage.value = "Please provide both URL and model name"
-                        return@Button
-                    }
-                    if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                        errorMessage.value = "Invalid URL"
-                        return@Button
-                    }
-                    onOpStatus(SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f))
-                    showCustomUrl.value = false
-                    scope.launch(Dispatchers.IO) {
-                        val result = synthesizer?.downloadFromUrl(url, name) { status ->
-                            onOpStatus(status)
-                        }
-                        withContext(Dispatchers.Main) {
-                            result?.onSuccess {
-                                customUrl.value = ""
-                                customModelName.value = ""
-                                errorMessage.value = null
-                                refreshModels()
-                            }?.onFailure { e ->
-                                errorMessage.value = "Download failed: ${e.message}"
+    if (showCustomUrlDialog.value) {
+        var dialogUrl by remember { mutableStateOf("") }
+        var dialogName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showCustomUrlDialog.value = false },
+            title = { Text("Download from URL") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = dialogUrl,
+                        onValueChange = { dialogUrl = it },
+                        label = { Text("Archive URL (.tar.bz2, .tar.gz, .zip, .onnx)") },
+                        placeholder = { Text("https://...") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = dialogName,
+                        onValueChange = { dialogName = it },
+                        label = { Text("Voice name") },
+                        placeholder = { Text("my-tts-model") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val url = dialogUrl.trim()
+                        val name = dialogName.trim()
+                        if (url.isBlank() || name.isBlank()) return@Button
+                        if (!url.startsWith("http://") && !url.startsWith("https://")) return@Button
+                        onOpStatus(SherpaOpStatus(SherpaOpPhase.DOWNLOADING, 0f))
+                        showCustomUrlDialog.value = false
+                        scope.launch(Dispatchers.IO) {
+                            val result = synthesizer?.downloadFromUrl(url, name) { status ->
+                                onOpStatus(status)
                             }
-                            onOpStatus(null)
+                            withContext(Dispatchers.Main) {
+                                result?.onSuccess {
+                                    errorMessage.value = null
+                                    refreshModels()
+                                }?.onFailure { e ->
+                                    errorMessage.value = "Download failed: ${e.message}"
+                                }
+                                onOpStatus(null)
+                            }
                         }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = customUrl.value.isNotBlank() && customModelName.value.isNotBlank()
-            ) {
-                Text("Download from URL")
+                    },
+                    enabled = dialogUrl.isNotBlank() && dialogName.isNotBlank()
+                ) {
+                    Text("Download")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCustomUrlDialog.value = false }) {
+                    Text("Cancel")
+                }
             }
-        }
+        )
+    }
 
-        if (showImportPicker.value) {
-            OutlinedTextField(
-                value = importModelName.value,
-                onValueChange = { importModelName.value = it },
-                label = { Text("Model name") },
-                placeholder = { Text("my-tts-model") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            Spacer(Modifier.height(4.dp))
-            Button(
-                onClick = {
-                    val name = importModelName.value.trim()
-                    if (name.isBlank()) {
-                        errorMessage.value = "Please provide a model name"
-                        return@Button
-                    }
-                    importFileLauncher.launch(arrayOf("*/*"))
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = importModelName.value.isNotBlank()
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Pick file (tar.gz, zip, onnx)")
+    if (showImportDialog.value) {
+        var voiceName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showImportDialog.value = false },
+            title = { Text("Import model from device") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = voiceName,
+                        onValueChange = { voiceName = it },
+                        label = { Text("Voice name") },
+                        placeholder = { Text("my-tts-model") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    Text(
+                        "The model will be saved with '-custom' suffix.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val name = voiceName.trim()
+                        if (name.isBlank()) return@Button
+                        pendingImportName = "${name}-custom"
+                        showImportDialog.value = false
+                        importFileLauncher.launch(arrayOf("*/*"))
+                    },
+                    enabled = voiceName.isNotBlank()
+                ) {
+                    Text("Pick file")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImportDialog.value = false }) {
+                    Text("Cancel")
+                }
             }
-        }
+        )
     }
 
     if (showModelPicker.value) {
