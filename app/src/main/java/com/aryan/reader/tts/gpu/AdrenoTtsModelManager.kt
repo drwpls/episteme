@@ -42,8 +42,9 @@ class AdrenoTtsModelManager(private val context: Context) {
         const val VOICE_PACK_SIZE_BYTES = 520_000L      // ~520 KB per voice
         const val ESPEAK_DATA_SIZE_BYTES = 936_000L     // ~936 KB for English
         
-        // HuggingFace model repository
-        const val HF_REPO_BASE = "https://huggingface.co/a8nova/kokoro-82m-android/resolve/main"
+        // GitHub model repository (forked from a8nova for stability)
+        // TODO: Update this URL after creating the forked repository
+        const val HF_REPO_BASE = "https://github.com/drwpls/kokoro-82m-android/releases/download/v1.0.0"
         
         // Required files
         val REQUIRED_FILES = listOf(

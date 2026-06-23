@@ -1796,37 +1796,59 @@ fun TtsSettingsSheet(
 
             Text(stringResource(R.string.tts_active_engine), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(8.dp))
-            Row(modifier = Modifier.fillMaxWidth().height(48.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(24.dp)).padding(4.dp)) {
-                    val modes = buildList {
-                        if (!isOss || isOssCloudAvailable) {
-                            add(TtsPlaybackManager.TtsMode.CLOUD to stringResource(R.string.tts_mode_cloud_ai))
-                        }
-                        add(TtsPlaybackManager.TtsMode.BASE to stringResource(R.string.tts_mode_device_native))
-                        add(TtsPlaybackManager.TtsMode.POCKET to stringResource(R.string.tts_mode_pocket_tts))
-                        add(TtsPlaybackManager.TtsMode.REMOTE_API to "Remote API")
-                        // Add Adreno GPU mode only if Adreno GPU is available
-                        if (AdrenoGpuDetector.isAdrenoGpuAvailable(context)) {
-                            add(TtsPlaybackManager.TtsMode.ADRENO_GPU to "GPU (Adreno)")
-                        }
+            
+            // Scrollable horizontal mode selector
+            val modes = buildList {
+                if (!isOss || isOssCloudAvailable) {
+                    add(TtsPlaybackManager.TtsMode.CLOUD to stringResource(R.string.tts_mode_cloud_ai))
+                }
+                add(TtsPlaybackManager.TtsMode.BASE to stringResource(R.string.tts_mode_device_native))
+                add(TtsPlaybackManager.TtsMode.POCKET to stringResource(R.string.tts_mode_pocket_tts))
+                add(TtsPlaybackManager.TtsMode.REMOTE_API to "Remote API")
+                // Add Adreno GPU mode only if Adreno GPU is available
+                if (AdrenoGpuDetector.isAdrenoGpuAvailable(context)) {
+                    add(TtsPlaybackManager.TtsMode.ADRENO_GPU to "GPU (Adreno)")
+                }
+            }
+            
+            val scrollState = rememberScrollState()
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(24.dp))
+                    .padding(4.dp)
+                    .horizontalScroll(scrollState),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                modes.forEach { (mode, title) ->
+                    val isSelected = currentMode == mode
+                    Box(
+                        modifier = Modifier
+                            .widthIn(min = 80.dp)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                            .clickable(enabled = !isTtsActive) {
+                                onModeChange(mode)
+                                if (mode == TtsPlaybackManager.TtsMode.CLOUD && selectedTabIndex == 1) selectedTabIndex = 0
+                                if (mode == TtsPlaybackManager.TtsMode.BASE && selectedTabIndex != 1) selectedTabIndex = 1
+                                if (mode == TtsPlaybackManager.TtsMode.POCKET) selectedTabIndex = 2
+                                if (mode == TtsPlaybackManager.TtsMode.REMOTE_API) selectedTabIndex = 2
+                                if (mode == TtsPlaybackManager.TtsMode.ADRENO_GPU) selectedTabIndex = 2
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = title,
+                            color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        )
                     }
-                    modes.forEach { (mode, title) ->
-                        val isSelected = currentMode == mode
-                        Box(
-                            modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(20.dp))
-                                .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                .clickable(enabled = !isTtsActive) {
-                                    onModeChange(mode)
-                                    if (mode == TtsPlaybackManager.TtsMode.CLOUD && selectedTabIndex == 1) selectedTabIndex = 0
-                                    if (mode == TtsPlaybackManager.TtsMode.BASE && selectedTabIndex != 1) selectedTabIndex = 1
-                                    if (mode == TtsPlaybackManager.TtsMode.POCKET) selectedTabIndex = 2
-                                    if (mode == TtsPlaybackManager.TtsMode.REMOTE_API) selectedTabIndex = 2
-                                    if (mode == TtsPlaybackManager.TtsMode.ADRENO_GPU) selectedTabIndex = 2
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(title, color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                        }
-                    }
+                }
             }
 
             pocketOpStatus?.let { status ->
@@ -2425,7 +2447,11 @@ fun AdrenoGpuSettingsTab(
                             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                             enabled = !isDownloading
                         ) {
-                            Text("Download Models")
+                            Text(
+                                text = "Download Models",
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                style = MaterialTheme.typography.labelLarge
+                            )
                         }
                     }
                 }
