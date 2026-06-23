@@ -116,7 +116,6 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -1866,7 +1865,7 @@ fun PocketTtsSettingsTab(
     onOpStatus: (SherpaOpStatus?) -> Unit,
     onModelsChanged: () -> Unit
 ) {
-    val downloadedModels = remember { mutableStateListOf<String>() }
+    var downloadedModels by remember { mutableStateOf<List<String>>(emptyList()) }
     val selectedModel = remember { mutableStateOf(synthesizer?.getCurrentModelName() ?: "") }
     val showModelPicker = remember { mutableStateOf(false) }
     val showCustomUrlDialog = remember { mutableStateOf(false) }
@@ -1874,8 +1873,7 @@ fun PocketTtsSettingsTab(
     val errorMessage = remember { mutableStateOf<String?>(null) }
 
     fun refreshModels() {
-        downloadedModels.clear()
-        downloadedModels.addAll(PocketTtsSynthesizer.getDownloadedModels(context))
+        downloadedModels = PocketTtsSynthesizer.getDownloadedModels(context)
         selectedModel.value = synthesizer?.getCurrentModelName() ?: ""
         onModelsChanged()
     }
