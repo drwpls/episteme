@@ -2356,12 +2356,15 @@ fun TtsOverlayControls(
                                 color = MaterialTheme.colorScheme.primaryContainer,
                                 shape = RoundedCornerShape(8.dp)
                             ) {
+                                val modeLabel = when (activeMode) {
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.CLOUD -> stringResource(R.string.tts_mode_cloud_ai)
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.BASE -> stringResource(R.string.tts_mode_device_native)
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.POCKET -> stringResource(R.string.tts_mode_pocket_tts)
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.REMOTE_API -> "Remote API"
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.ADRENO_GPU -> "GPU"
+                                }
                                 Text(
-                                    if (activeMode == com.aryan.reader.tts.TtsPlaybackManager.TtsMode.CLOUD) {
-                                        stringResource(R.string.tts_mode_cloud_ai)
-                                    } else {
-                                        stringResource(R.string.tts_mode_device_native)
-                                    },
+                                    modeLabel,
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer,
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -2372,9 +2375,24 @@ fun TtsOverlayControls(
                                 color = MaterialTheme.colorScheme.secondaryContainer,
                                 shape = RoundedCornerShape(8.dp)
                             ) {
-                                val voiceName = if (activeMode == com.aryan.reader.tts.TtsPlaybackManager.TtsMode.CLOUD) {
-                                    GEMINI_TTS_SPEAKERS.find { it.id == ttsState.speakerId }?.name ?: ttsState.speakerId
-                                } else loadNativeVoice(context)?.split("-")?.lastOrNull() ?: stringResource(R.string.label_default)
+                                val voiceName = when (activeMode) {
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.CLOUD -> {
+                                        GEMINI_TTS_SPEAKERS.find { it.id == ttsState.speakerId }?.name ?: ttsState.speakerId
+                                    }
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.POCKET -> {
+                                        // Show the current PocketTTS model name
+                                        ttsState.speakerId.takeIf { it.isNotBlank() } ?: stringResource(R.string.label_default)
+                                    }
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.REMOTE_API -> {
+                                        // Show Remote API voice
+                                        ttsState.speakerId.takeIf { it.isNotBlank() } ?: "Default"
+                                    }
+                                    com.aryan.reader.tts.TtsPlaybackManager.TtsMode.ADRENO_GPU -> {
+                                        // Show Adreno GPU voice
+                                        ttsState.speakerId.takeIf { it.isNotBlank() } ?: "af_heart"
+                                    }
+                                    else -> loadNativeVoice(context)?.split("-")?.lastOrNull() ?: stringResource(R.string.label_default)
+                                }
 
                                 Text(
                                     voiceName,
