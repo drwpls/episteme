@@ -966,7 +966,11 @@ class TtsService : MediaSessionService() {
     private val synthesizePocketTtsChunk: suspend (String) -> TtsAudioData =
         { chunkToSpeak ->
             val (file, text) = pocketTtsSynthesizer.synthesizeToFile(chunkToSpeak)
-            TtsAudioData(file, text, null)
+            if (file == null) {
+                TtsAudioData(file, null, null, error = text ?: getString(R.string.tts_error_load_audio))
+            } else {
+                TtsAudioData(file, text, null)
+            }
         }
 
     val audioGenerator: suspend (bookTitle: String, chapterTitle: String?, chunkIndex: Int, totalChunks: Int, text: String, speaker: String, mode: TtsMode, authToken: String?) -> TtsAudioData =

@@ -3,6 +3,7 @@ package com.aryan.reader.tts
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import com.aryan.reader.BuildConfig
+import com.aryan.reader.R
 import com.aryan.reader.epubreader.loadTtsSpeechRate
 import com.k2fsa.sherpa.onnx.GenerationConfig
 import com.k2fsa.sherpa.onnx.OfflineTts
@@ -91,7 +92,11 @@ class PocketTtsSynthesizer(private val context: Context) {
         fun getDownloadedModels(context: Context): List<String> {
             val dir = getModelsDirectory(context)
             if (!dir.isDirectory) return emptyList()
-            return dir.listFiles()?.filter { it.isDirectory }?.map { it.name }?.sorted() ?: emptyList()
+            return dir.listFiles()
+                ?.filter { it.isDirectory && resolveModelRootDir(it) != null }
+                ?.map { it.name }
+                ?.sorted()
+                ?: emptyList()
         }
 
         fun getSelectedModelName(context: Context): String {
@@ -110,11 +115,12 @@ class PocketTtsSynthesizer(private val context: Context) {
 
         fun isModelDownloaded(context: Context, modelName: String): Boolean {
             val modelDir = File(getModelsDirectory(context), modelName)
-            return modelDir.isDirectory() && modelDir.list()?.isNotEmpty() == true
+            return resolveModelRootDir(modelDir) != null
         }
 
         fun detectModelType(modelDir: File): ModelType {
-            val files = modelDir.list() ?: return ModelType.POCKET
+            val modelRoot = resolveModelRootDir(modelDir) ?: modelDir
+            val files = modelRoot.list() ?: return ModelType.POCKET
             return if (files.any { it == "lm_flow.int8.onnx" }) {
                 ModelType.POCKET
             } else if (files.any { it == "model.onnx" } && files.any { it == "voices.bin" }) {
@@ -127,6 +133,30 @@ class PocketTtsSynthesizer(private val context: Context) {
         fun detectModelTypeByName(modelName: String): ModelType {
             val lower = modelName.lowercase()
             return if (lower.startsWith("kokoro")) ModelType.KOKORO else ModelType.POCKET
+        }
+
+        fun resolveModelRootDir(modelDir: File): File? {
+            if (hasPocketModelFiles(modelDir) || hasKokoroModelFiles(modelDir)) return modelDir
+            return modelDir.listFiles()
+                ?.filter { it.isDirectory }
+                ?.firstOrNull { hasPocketModelFiles(it) || hasKokoroModelFiles(it) }
+        }
+
+        private fun hasPocketModelFiles(dir: File): Boolean {
+            return listOf(
+                "lm_flow.int8.onnx",
+                "lm_main.int8.onnx",
+                "encoder.onnx",
+                "decoder.int8.onnx",
+                "text_conditioner.onnx",
+                "vocab.json",
+                "token_scores.json"
+            ).all { File(dir, it).isFile }
+        }
+
+        private fun hasKokoroModelFiles(dir: File): Boolean {
+            return listOf("model.onnx", "voices.bin", "tokens.txt", "espeak-ng-data")
+                .all { File(dir, it).exists() }
         }
     }
 
@@ -191,6 +221,9 @@ class PocketTtsSynthesizer(private val context: Context) {
 
     suspend fun synthesizeToFile(text: String): Pair<File?, String?> {
         if (text.isBlank()) return Pair(null, text)
+        if (!hasUsableModel()) {
+            return Pair(null, context.getString(R.string.tts_pocket_no_model))
+        }
 
         return withContext(Dispatchers.IO) {
             mutex.withLock {
@@ -209,6 +242,12 @@ class PocketTtsSynthesizer(private val context: Context) {
                 }
             }
         }
+    }
+
+    fun hasUsableModel(): Boolean {
+        val selectedModel = getCurrentModelName()
+        if (selectedModel.isNotBlank() && isModelDownloaded(context, selectedModel)) return true
+        return hasBundledModelAssets()
     }
 
     fun release() {
@@ -234,7 +273,9 @@ class PocketTtsSynthesizer(private val context: Context) {
 
         val modelConfig = OfflineTtsModelConfig()
         if (useFileModel) {
-            val modelDir = File(getModelsDirectory(context), selectedModel).absolutePath
+            val modelRootDir = resolveModelRootDir(File(getModelsDirectory(context), selectedModel))
+                ?: error(context.getString(R.string.tts_pocket_no_model))
+            val modelDir = modelRootDir.absolutePath
             when (modelType) {
                 ModelType.POCKET -> {
                     val pocketConfig = OfflineTtsPocketModelConfig()
@@ -302,9 +343,14 @@ class PocketTtsSynthesizer(private val context: Context) {
         val genConfig = GenerationConfig()
         when (modelType) {
             ModelType.POCKET -> {
+                val modelRootDir = if (isFileModel) {
+                    resolveModelRootDir(File(getModelsDirectory(context), selectedModel))
+                } else {
+                    null
+                }
                 val referenceWave = if (isFileModel) {
-                    val refFile = getModelFile(context, selectedModel, "test_wavs/bria.wav")
-                    if (refFile.exists()) readReferenceWaveFile(refFile)
+                    val refFile = modelRootDir?.let { File(it, "test_wavs/bria.wav") }
+                    if (refFile?.exists() == true) readReferenceWaveFile(refFile)
                     else readReferenceAudioFromAssets()
                 } else {
                     readReferenceAudioFromAssets()
@@ -327,6 +373,24 @@ class PocketTtsSynthesizer(private val context: Context) {
         val assetPath = BuildConfig.POCKET_TTS_REFERENCE_AUDIO.trim().trim('/')
         val bytes = context.assets.open(assetPath).use { it.readBytes() }
         return parsePcm16Wav(bytes)
+    }
+
+    private fun hasBundledModelAssets(): Boolean {
+        val modelDir = BuildConfig.POCKET_TTS_MODEL_DIR.trim().trim('/')
+        if (modelDir.isBlank()) return false
+        return runCatching {
+            val required = listOf(
+                "lm_flow.int8.onnx",
+                "lm_main.int8.onnx",
+                "encoder.onnx",
+                "decoder.int8.onnx",
+                "text_conditioner.onnx",
+                "vocab.json",
+                "token_scores.json"
+            )
+            val modelFiles = context.assets.list(modelDir)?.toSet().orEmpty()
+            required.all { it in modelFiles } && context.assets.open(BuildConfig.POCKET_TTS_REFERENCE_AUDIO.trim().trim('/')).use { true }
+        }.getOrDefault(false)
     }
 
     private fun readReferenceWaveFile(file: File): ReferenceWave {

@@ -66,6 +66,7 @@ import com.aryan.reader.shared.sharedSettingsHubModel
 import com.aryan.reader.shared.toReaderSettings
 import com.aryan.reader.shared.ui.SharedSettingsHub
 import com.aryan.reader.tts.loadTtsMode
+import com.aryan.reader.tts.saveTtsMode
 import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -368,6 +369,7 @@ fun SettingsScreen(
             currentMode = ttsMode,
             onModeChange = { mode ->
                 ttsMode = mode
+                saveTtsMode(context, mode)
                 viewModel.ttsController.changeTtsMode(mode.name)
             },
             currentSpeakerId = ttsState.speakerId,

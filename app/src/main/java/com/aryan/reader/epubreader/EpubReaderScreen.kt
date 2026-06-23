@@ -773,7 +773,11 @@ fun EpubReaderHost(
     var currentTtsMode by remember {
         mutableStateOf(
             loadTtsMode(context).let {
-                if (BuildConfig.FLAVOR == "oss" && !isByokCloudTtsAvailable(context)) TtsPlaybackManager.TtsMode.BASE else it
+                if (it == TtsPlaybackManager.TtsMode.CLOUD && BuildConfig.FLAVOR == "oss" && !isByokCloudTtsAvailable(context)) {
+                    TtsPlaybackManager.TtsMode.BASE
+                } else {
+                    it
+                }
             }
         )
     }

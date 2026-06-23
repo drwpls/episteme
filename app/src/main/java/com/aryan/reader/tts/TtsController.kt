@@ -62,6 +62,12 @@ fun loadTtsMode(context: Context): TtsPlaybackManager.TtsMode {
 }
 
 @OptIn(UnstableApi::class)
+fun saveTtsMode(context: Context, mode: TtsPlaybackManager.TtsMode) {
+    val prefs = context.getSharedPreferences("reader_prefs", Context.MODE_PRIVATE)
+    prefs.edit { putString("tts_mode", mode.name) }
+}
+
+@OptIn(UnstableApi::class)
 internal fun resolveTtsModeForCurrentBuild(
     context: Context,
     requestedModeName: String?
@@ -289,8 +295,7 @@ class TtsController(context: Context) : Player.Listener {
     fun changeTtsMode(mode: String) {
         Timber.d("UI sending CHANGE_TTS_MODE command.")
         val effectiveMode = resolveTtsModeForCurrentBuild(context, mode)
-        val prefs = context.getSharedPreferences("reader_prefs", Context.MODE_PRIVATE)
-        prefs.edit { putString("tts_mode", effectiveMode.name) }
+        saveTtsMode(context, effectiveMode)
         _ttsState.value = _ttsState.value.copy(ttsMode = effectiveMode.name)
 
         val args = Bundle().apply {
