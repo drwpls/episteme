@@ -3,6 +3,7 @@ package com.aryan.reader.tts
 import android.content.Context
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import com.aryan.reader.BuildConfig
 import com.aryan.reader.R
 import com.aryan.reader.epubreader.loadTtsSpeechRate
@@ -161,6 +162,26 @@ class PocketTtsSynthesizer(private val context: Context) {
             return listOf("model.onnx", "voices.bin", "tokens.txt", "espeak-ng-data")
                 .all { File(dir, it).exists() }
         }
+
+        private fun resolveFileName(uri: Uri): String {
+            val cursor = try {
+                context.contentResolver.query(uri, null, null, null, null)
+            } catch (_: Exception) { null }
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val idx = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) it.getString(idx)?.let { name ->
+                        return name.lowercase()
+                    }
+                }
+            }
+            val segment = uri.lastPathSegment?.lowercase() ?: return "model"
+            return try {
+                java.net.URLDecoder.decode(segment, "UTF-8").substringAfterLast('/')
+            } catch (_: Exception) {
+                segment.substringAfterLast('/')
+            }
+        }
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -263,7 +284,7 @@ class PocketTtsSynthesizer(private val context: Context) {
         try {
             val modelDir = File(getModelsDirectory(context), modelName)
             modelDir.mkdirs()
-            val fileName = uri.lastPathSegment?.lowercase() ?: "model"
+            val fileName = resolveFileName(uri)
             val cacheFile = File(context.cacheDir, fileName)
 
             val input = context.contentResolver.openInputStream(uri)
